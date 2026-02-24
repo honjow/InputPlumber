@@ -47,6 +47,7 @@ source_devices:
     hidraw:
       vendor_id: 0x1a86
       product_id: 0xfe00
+      interface_num: 2
   - group: gamepad
     udev:
       id_vendor: "1a86"

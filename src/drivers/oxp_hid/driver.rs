@@ -8,6 +8,7 @@ use super::event::{BinaryInput, Event, GamepadButtonEvent};
 
 pub const VID: u16 = 0x1a86;
 pub const PID: u16 = 0xfe00;
+pub const IID: i32 = 0x02;
 
 const PACKET_SIZE: usize = 64;
 
