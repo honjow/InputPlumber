@@ -34,12 +34,34 @@ source_devices:
       vendor_id: "0db0"
       product_id: "1901"
       phys_path: "usb-0000:c6:00.0-3/input0"
+
+  # Xinput remapping gamepad
+  - group: gamepad
+    evdev:
+      vendor_id: "0db0"
+      product_id: "1901"
+      phys_path: "usb-0000:c6:00.0-3/input2"
+
+  # Guide button for newer bios (needs kernel patch)
+  - group: keyboard
+    evdev:
+      name: "MSI WMI hotkeys"
+      handler: event*
+      phys_path: "wmi/input0"
+
   - group: gamepad
     passthrough: true
     hidraw:
       vendor_id: 0x0db0
       product_id: 0x1901
       interface_num: 2
+
+  # Interface 01 for M1/M2 button configuration (hid-msi-claw driver)
+  - group: gamepad
+    hidraw:
+      vendor_id: 0x0db0
+      product_id: 0x1901
+      interface_num: 1
 
   # IMU
 
