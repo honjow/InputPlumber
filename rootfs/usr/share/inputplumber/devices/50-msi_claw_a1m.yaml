@@ -49,6 +49,13 @@ source_devices:
       product_id: 0x1901
       interface_num: 2
 
+  # Interface 01 for M1/M2 button configuration (hid-msi-claw driver)
+  - group: gamepad
+    hidraw:
+      vendor_id: 0x0db0
+      product_id: 0x1901
+      interface_num: 1
+
   # IMU
   - group: imu
     iio:

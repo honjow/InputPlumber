@@ -9,7 +9,7 @@ use udev::Device;
 
 use crate::{
     drivers::msi_claw::hid_report::Command,
-    udev::device::{AttributeSetter, UdevDevice},
+    udev::device::{AttributeGetter, AttributeSetter, UdevDevice},
 };
 
 use super::hid_report::{GamepadMode, MkeysFunction, PackedCommandReport};
@@ -19,7 +19,7 @@ pub const VID: u16 = 0x0db0;
 pub const PID: u16 = 0x1901;
 
 pub struct Driver {
-    device: HidDevice,
+    device: Option<HidDevice>,
 }
 
 impl Driver {
@@ -30,24 +30,36 @@ impl Driver {
             return Err(format!("'{}' is not a MSI Claw controller", udevice.devnode()).into());
         }
 
-        // Try to configure M1/M2 buttons via sysfs if kernel driver supports it
-        if let Ok(device) = udevice.get_device() {
-            configure_m_remap(device);
+        let device = udevice.get_device()?;
+        let if_num = device.get_attribute_from_tree("bInterfaceNumber");
+
+        match if_num.as_str() {
+            "01" => {
+                // Interface 01: Configure M1/M2 buttons via sysfs
+                log::debug!("Configuring M1/M2 buttons on interface 01");
+                configure_m_remap(device);
+                Ok(Self { device: None })
+            }
+            "02" => {
+                // Interface 02: Open hidraw for mode switching
+                let path = udevice.devnode();
+                let path = CString::new(path)?;
+                let api = hidapi::HidApi::new()?;
+                let hid_device = api.open_path(&path)?;
+                hid_device.set_blocking_mode(false)?;
+                Ok(Self { device: Some(hid_device) })
+            }
+            _ => Err(format!("Invalid interface number {if_num}").into()),
         }
-
-        // Open the hidraw device
-        let path = udevice.devnode();
-        let path = CString::new(path)?;
-        let api = hidapi::HidApi::new()?;
-        let device = api.open_path(&path)?;
-        device.set_blocking_mode(false)?;
-
-        Ok(Self { device })
     }
 
     pub fn poll(&self) -> Result<Option<PackedCommandReport>, Box<dyn Error + Send + Sync>> {
+        let Some(ref device) = self.device else {
+            return Ok(None);
+        };
+
         let mut buf = [0; 8];
-        let bytes_read = self.device.read(&mut buf[..])?;
+        let bytes_read = device.read(&mut buf[..])?;
         if bytes_read == 0 {
             return Ok(None);
         }
@@ -72,6 +84,10 @@ impl Driver {
         mode: GamepadMode,
         mkeys: MkeysFunction,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let Some(ref device) = self.device else {
+            return Ok(());
+        };
+
         let report = PackedCommandReport::switch_mode(mode, mkeys);
         let data = report.pack()?;
 
@@ -80,7 +96,7 @@ impl Driver {
         // received. Attempts (buffer_size / report_size) number of times (8).
         for _ in 0..8 {
             // Write the SetMode command
-            self.device.write(&data)?;
+            device.write(&data)?;
             std::thread::sleep(Duration::from_millis(50));
 
             // Poll the device for an acknowlgement response
@@ -100,9 +116,13 @@ impl Driver {
 
     /// Send a get mode request to the device
     pub fn get_mode(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let Some(ref device) = self.device else {
+            return Ok(());
+        };
+
         let report = PackedCommandReport::read_mode();
         let data = report.pack()?;
-        self.device.write(&data)?;
+        device.write(&data)?;
 
         Ok(())
     }
