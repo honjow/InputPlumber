@@ -594,7 +594,10 @@ impl HidRawDevice {
         }
 
         // OXP X1 HID Controller
-        if vid == drivers::oxp_hid::driver::VID && pid == drivers::oxp_hid::driver::PID {
+        if vid == drivers::oxp_hid::driver::VID
+            && pid == drivers::oxp_hid::driver::PID
+            && iid == drivers::oxp_hid::driver::IID
+        {
             log::info!("Detected OXP X1 HID controller");
             return DriverType::OxpX1Hid;
         }
