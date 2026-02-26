@@ -45,7 +45,7 @@ impl Driver {
         })
     }
 
-    /// Returns the frame counter from the most recent input report.
+    /// Returns the current frame counter from the most recent input report, if any.
     pub fn get_frame(&self) -> Option<u32> {
         self.state.as_ref().map(|s| s.frame.to_primitive())
     }

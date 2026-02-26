@@ -17,7 +17,9 @@ use crate::{
 
 use self::{accel_gyro_3d::AccelGyro3dImu, bmi_imu::BmiImu};
 
-use super::{InputError, OutputError, SourceDeviceCompatible, SourceDriver};
+use std::time::Duration;
+
+use super::{InputError, OutputError, SourceDeviceCompatible, SourceDriver, SourceDriverOptions};
 
 /// List of available drivers
 enum DriverType {
@@ -97,14 +99,40 @@ impl IioDevice {
             DriverType::Unknown => Err("No driver for iio interface found".into()),
             DriverType::BmiImu => {
                 let device = BmiImu::new(device_info.clone(), iio_config)?;
-                let source_device =
-                    SourceDriver::new(composite_device, device, device_info.into(), conf);
+                let options = if device.is_buffer_mode() {
+                    SourceDriverOptions {
+                        poll_rate: Duration::ZERO,
+                        ..Default::default()
+                    }
+                } else {
+                    SourceDriverOptions::default()
+                };
+                let source_device = SourceDriver::new_with_options(
+                    composite_device,
+                    device,
+                    device_info.into(),
+                    options,
+                    conf,
+                );
                 Ok(Self::BmiImu(source_device))
             }
             DriverType::AccelGryo3D => {
                 let device = AccelGyro3dImu::new(device_info.clone(), iio_config)?;
-                let source_device =
-                    SourceDriver::new(composite_device, device, device_info.into(), conf);
+                let options = if device.is_buffer_mode() {
+                    SourceDriverOptions {
+                        poll_rate: Duration::ZERO,
+                        ..Default::default()
+                    }
+                } else {
+                    SourceDriverOptions::default()
+                };
+                let source_device = SourceDriver::new_with_options(
+                    composite_device,
+                    device,
+                    device_info.into(),
+                    options,
+                    conf,
+                );
                 Ok(Self::AccelGryo3D(source_device))
             }
         }

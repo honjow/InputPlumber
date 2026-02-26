@@ -16,6 +16,11 @@ pub struct AccelGyro3dImu {
 }
 
 impl AccelGyro3dImu {
+    /// Returns true if the driver is in buffer mode (no sleep needed in poll loop)
+    pub fn is_buffer_mode(&self) -> bool {
+        self.driver.is_buffer_mode()
+    }
+
     /// Create a new Accel Gyro 3D source device with the given udev
     /// device information
     pub fn new(
@@ -98,6 +103,7 @@ fn translate_events(events: Vec<iio_imu::event::Event>) -> Vec<NativeEvent> {
 fn translate_event(event: iio_imu::event::Event) -> NativeEvent {
     match event {
         iio_imu::event::Event::Accelerometer(data, ts) => {
+            // IIO accel values are in m/s^2 (standard internal unit)
             let cap = Capability::Accelerometer(Source::Center);
             let value = InputValue::Vector3 {
                 x: Some(data.roll),
@@ -107,6 +113,7 @@ fn translate_event(event: iio_imu::event::Event) -> NativeEvent {
             NativeEvent::new_with_timestamp(cap, value, ts)
         }
         iio_imu::event::Event::Gyro(data, ts) => {
+            // IIO gyro values are in rad/s; convert to deg/s (standard internal unit)
             let cap = Capability::Gyroscope(Source::Center);
             let value = InputValue::Vector3 {
                 x: Some(data.roll * (180.0 / PI)),

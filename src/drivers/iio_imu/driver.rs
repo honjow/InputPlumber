@@ -1,12 +1,13 @@
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
-    fs::File,
+    fs::{self, File},
     io::{self, BufRead, BufReader},
+    path::Path,
     time::Instant,
 };
 
-use industrial_io::{Channel, ChannelType, Device, Direction};
+use industrial_io::{buffer::Buffer, Channel, ChannelType, Device, Direction};
 
 use crate::{
     drivers::iio_imu::info::MountMatrix,
@@ -18,16 +19,37 @@ use super::{
     info::AxisInfo,
 };
 
-/// Driver for reading IIO IMU data
+/// Noise threshold for value change detection (in physical units after scale).
+/// Values below this threshold are considered noise and are suppressed.
+const GYRO_NOISE_THRESHOLD: f64 = 0.01;
+const ACCEL_NOISE_THRESHOLD: f64 = 0.01;
+
+/// Default sampling rate in Hz when using buffer mode
+const DEFAULT_SAMPLE_RATE_HZ: f64 = 400.0;
+
+/// Name prefix for hrtimer triggers created by InputPlumber
+const HRTIMER_TRIGGER_NAME: &str = "inputplumber";
+
+/// Driver for reading IIO IMU data.
+/// Supports two modes:
+///   - **Buffer mode**: uses IIO kernel buffers + trigger for atomic, efficient reads
+///   - **Sysfs mode** (fallback): reads channel attributes directly
 pub struct Driver {
     mount_matrix: MountMatrix,
     accel: HashMap<String, Channel>,
     accel_info: HashMap<String, AxisInfo>,
     gyro: HashMap<String, Channel>,
     gyro_info: HashMap<String, AxisInfo>,
-    /// List of events that should not be generated
     filtered_events: HashSet<Capability>,
+    prev_accel: AxisData,
+    prev_gyro: AxisData,
     start_time: Instant,
+    /// IIO buffer for atomic data reading (None = sysfs fallback mode)
+    buffer: Option<Buffer>,
+    /// Hardware timestamp channel if available
+    timestamp_channel: Option<Channel>,
+    /// Whether this driver created the hrtimer trigger (and should clean it up)
+    owns_hrtimer_trigger: bool,
 }
 
 impl Driver {
@@ -38,23 +60,16 @@ impl Driver {
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         log::debug!("Creating IIO IMU driver instance for {name}");
 
-        // Create an IIO local context used to query for devices
         let ctx = industrial_io::context::Context::new()?;
         log::debug!("IIO context version: {}", ctx.version());
 
-        // Find the IMU device
         let Some(device) = ctx.find_device(id.as_str()) else {
             return Err("Failed to find device".into());
         };
 
-        // Try finding the mount matrix to determine how sensors were mounted inside
-        // the device.
-        // https://github.com/torvalds/linux/blob/master/Documentation/devicetree/bindings/iio/mount-matrix.txt
         let mount_matrix = if let Some(matrix) = matrix {
-            // Use the provided mount matrix if it is defined
             matrix
         } else if let Some(mount) = device.find_channel("mount", Direction::Input) {
-            // Read from the matrix
             let matrix_str = mount.attr_read_str("matrix")?;
             log::debug!("Found mount matrix: {matrix_str}");
             let matrix = MountMatrix::new(matrix_str)?;
@@ -64,7 +79,6 @@ impl Driver {
             MountMatrix::default()
         };
 
-        // Find all accelerometer and gyro channels and insert them into a hashmap
         let (accel, accel_info) = get_channels_with_type(&device, ChannelType::Accel);
         for attr in &accel_info {
             log::debug!("Found accel_info: {:?}", attr);
@@ -74,12 +88,9 @@ impl Driver {
             log::debug!("Found gyro_info: {:?}", attr);
         }
 
-        // Log device attributes
         for attr in device.attributes() {
             log::trace!("Found device attribute: {:?}", attr)
         }
-
-        // Log all found channels
         for channel in device.channels() {
             log::trace!("Found channel: {:?} {:?}", channel.id(), channel.name());
             log::trace!("  Is output: {}", channel.is_output());
@@ -89,7 +100,9 @@ impl Driver {
             }
         }
 
-        // Calculate the initial sample delay
+        // Try to set up buffer mode with trigger
+        let (buffer, timestamp_channel, owns_hrtimer) =
+            try_setup_buffer_mode(&device, &accel, &gyro, &ctx);
 
         Ok(Self {
             mount_matrix,
@@ -98,14 +111,15 @@ impl Driver {
             gyro,
             gyro_info,
             filtered_events: Default::default(),
+            prev_accel: AxisData::default(),
+            prev_gyro: AxisData::default(),
             start_time: Instant::now(),
+            buffer,
+            timestamp_channel,
+            owns_hrtimer_trigger: owns_hrtimer,
         })
     }
 
-    //TODO: Using InputPlumber Capability enum prevents this driver from having the ability to be
-    //a standalone crate. When this driver is eventually separated, refactor the Event type to
-    //follow the pattern DeviceEvent(Event, Value) and create a match table for
-    //Capability->Event/Event->Capability in the SourceDriver implementation.
     pub fn update_filtered_events(&mut self, events: HashSet<Capability>) {
         self.filtered_events = events;
     }
@@ -132,26 +146,138 @@ impl Driver {
         Ok(filtered_events)
     }
 
+    /// Returns true if the driver is in buffer mode
+    pub fn is_buffer_mode(&self) -> bool {
+        self.buffer.is_some()
+    }
+
     /// Poll the device for data
-    pub fn poll(&self) -> Result<Vec<Event>, Box<dyn Error + Send + Sync>> {
+    pub fn poll(&mut self) -> Result<Vec<Event>, Box<dyn Error + Send + Sync>> {
+        if self.buffer.is_some() {
+            self.poll_buffer()
+        } else {
+            self.poll_sysfs()
+        }
+    }
+
+    /// Poll using IIO buffer mode — blocks until trigger fires
+    fn poll_buffer(&mut self) -> Result<Vec<Event>, Box<dyn Error + Send + Sync>> {
+        let read_accel = !self
+            .filtered_events
+            .contains(&Capability::Accelerometer(Source::Center));
+        let read_gyro = !self
+            .filtered_events
+            .contains(&Capability::Gyroscope(Source::Center));
+
+        // All buffer reads happen in this block so the mutable borrow is released
+        // before we call self.rotate_value().
+        let (ts, accel_input, gyro_input) = {
+            let buffer = self.buffer.as_mut().unwrap();
+            buffer.refill()?;
+
+            let ts = if let Some(ref ts_chan) = self.timestamp_channel {
+                match ts_chan.read::<i64>(buffer) {
+                    Ok(vals) if !vals.is_empty() => (vals[0] / 1000) as u64,
+                    _ => self.start_time.elapsed().as_micros() as u64,
+                }
+            } else {
+                self.start_time.elapsed().as_micros() as u64
+            };
+
+            let accel_input = if read_accel {
+                let mut data = AxisData::default();
+                for (id, channel) in self.accel.iter() {
+                    let Some(info) = self.accel_info.get(id) else {
+                        continue;
+                    };
+                    let raw_vals = channel.read::<i32>(buffer)?;
+                    if raw_vals.is_empty() {
+                        continue;
+                    }
+                    let value = (raw_vals[0] as i64 + info.offset) as f64 * info.scale;
+                    if id.ends_with('x') {
+                        data.roll = value;
+                    }
+                    if id.ends_with('y') {
+                        data.pitch = value;
+                    }
+                    if id.ends_with('z') {
+                        data.yaw = value;
+                    }
+                }
+                Some(data)
+            } else {
+                None
+            };
+
+            let gyro_input = if read_gyro {
+                let mut data = AxisData::default();
+                for (id, channel) in self.gyro.iter() {
+                    let Some(info) = self.gyro_info.get(id) else {
+                        continue;
+                    };
+                    let raw_vals = channel.read::<i32>(buffer)?;
+                    if raw_vals.is_empty() {
+                        continue;
+                    }
+                    let value = (raw_vals[0] as i64 + info.offset) as f64 * info.scale;
+                    if id.ends_with('x') {
+                        data.roll = value;
+                    }
+                    if id.ends_with('y') {
+                        data.pitch = value;
+                    }
+                    if id.ends_with('z') {
+                        data.yaw = value;
+                    }
+                }
+                Some(data)
+            } else {
+                None
+            };
+
+            (ts, accel_input, gyro_input)
+        };
+
         let mut events = vec![];
 
-        // Read from the accelerometer
+        if let Some(mut accel) = accel_input {
+            self.rotate_value(&mut accel);
+            if axis_changed(&accel, &self.prev_accel, ACCEL_NOISE_THRESHOLD) {
+                self.prev_accel = accel.clone();
+                events.push(Event::Accelerometer(accel, ts));
+            }
+        }
+
+        if let Some(mut gyro) = gyro_input {
+            self.rotate_value(&mut gyro);
+            if axis_changed(&gyro, &self.prev_gyro, GYRO_NOISE_THRESHOLD) {
+                self.prev_gyro = gyro.clone();
+                events.push(Event::Gyro(gyro, ts));
+            }
+        }
+
+        Ok(events)
+    }
+
+    /// Poll using sysfs attribute reads (fallback mode)
+    fn poll_sysfs(&mut self) -> Result<Vec<Event>, Box<dyn Error + Send + Sync>> {
+        let mut events = vec![];
+
         if !self
             .filtered_events
             .contains(&Capability::Accelerometer(Source::Center))
         {
-            if let Some(event) = self.poll_accel()? {
+            if let Some(event) = self.poll_accel_sysfs()? {
                 events.push(event);
             }
         }
 
-        // Read from the gyro
         if !self
             .filtered_events
             .contains(&Capability::Gyroscope(Source::Center))
         {
-            if let Some(event) = self.poll_gyro()? {
+            if let Some(event) = self.poll_gyro_sysfs()? {
                 events.push(event);
             }
         }
@@ -159,18 +285,13 @@ impl Driver {
         Ok(events)
     }
 
-    /// Polls all the channels from the accelerometer
-    fn poll_accel(&self) -> Result<Option<Event>, Box<dyn Error + Send + Sync>> {
-        // Read from each accel channel
+    fn poll_accel_sysfs(&mut self) -> Result<Option<Event>, Box<dyn Error + Send + Sync>> {
         let mut accel_input = AxisData::default();
         for (id, channel) in self.accel.iter() {
-            // Get the info for the axis and read the data
             let Some(info) = self.accel_info.get(id) else {
                 continue;
             };
             let data = channel.attr_read_int("raw")?;
-
-            // processed_value = (raw + offset) * scale
             let value = (data + info.offset) as f64 * info.scale;
             if id.ends_with('x') {
                 accel_input.roll = value;
@@ -184,24 +305,22 @@ impl Driver {
         }
         self.rotate_value(&mut accel_input);
 
+        if !axis_changed(&accel_input, &self.prev_accel, ACCEL_NOISE_THRESHOLD) {
+            return Ok(None);
+        }
+        self.prev_accel = accel_input.clone();
         let ts = self.start_time.elapsed().as_micros() as u64;
         Ok(Some(Event::Accelerometer(accel_input, ts)))
     }
 
-    /// Polls all the channels from the gyro
-    fn poll_gyro(&self) -> Result<Option<Event>, Box<dyn Error + Send + Sync>> {
-        // Read from each accel channel
+    fn poll_gyro_sysfs(&mut self) -> Result<Option<Event>, Box<dyn Error + Send + Sync>> {
         let mut gyro_input = AxisData::default();
         for (id, channel) in self.gyro.iter() {
-            // Get the info for the axis and read the data
             let Some(info) = self.gyro_info.get(id) else {
                 continue;
             };
             let data = channel.attr_read_int("raw")?;
-
-            // processed_value = (raw + offset) * scale
             let value = (data + info.offset) as f64 * info.scale;
-
             if id.ends_with('x') {
                 gyro_input.roll = value;
             }
@@ -214,12 +333,15 @@ impl Driver {
         }
         self.rotate_value(&mut gyro_input);
 
+        if !axis_changed(&gyro_input, &self.prev_gyro, GYRO_NOISE_THRESHOLD) {
+            return Ok(None);
+        }
+        self.prev_gyro = gyro_input.clone();
         let ts = self.start_time.elapsed().as_micros() as u64;
         Ok(Some(Event::Gyro(gyro_input, ts)))
     }
 
-    /// Rotate the given axis data according to the mount matrix. This is used
-    /// to calculate the final value according to the sensor oritentation.
+    /// Rotate the given axis data according to the mount matrix.
     // Values are intended to be multiplied as:
     //   x' = mxx * x + myx * y + mzx * z
     //   y' = mxy * x + myy * y + mzy * z
@@ -243,6 +365,173 @@ impl Driver {
     }
 }
 
+impl Drop for Driver {
+    fn drop(&mut self) {
+        // Clean up hrtimer trigger if we created it
+        if self.owns_hrtimer_trigger {
+            let trigger_path = format!(
+                "/sys/kernel/config/iio/triggers/hrtimer/{}",
+                HRTIMER_TRIGGER_NAME
+            );
+            if Path::new(&trigger_path).exists() {
+                log::debug!("Removing hrtimer trigger: {trigger_path}");
+                if let Err(e) = fs::remove_dir(&trigger_path) {
+                    log::warn!("Failed to remove hrtimer trigger: {e:?}");
+                }
+            }
+        }
+    }
+}
+
+/// Try to set up IIO buffer mode with a suitable trigger.
+/// Returns (buffer, timestamp_channel, owns_hrtimer_trigger).
+/// If setup fails at any step, returns (None, None, false) for sysfs fallback.
+fn try_setup_buffer_mode(
+    device: &Device,
+    accel: &HashMap<String, Channel>,
+    gyro: &HashMap<String, Channel>,
+    ctx: &industrial_io::context::Context,
+) -> (Option<Buffer>, Option<Channel>, bool) {
+    // Check if device supports buffered I/O
+    if !device.is_buffer_capable() {
+        log::info!("IIO device is not buffer-capable, using sysfs mode");
+        return (None, None, false);
+    }
+
+    // Enable scan element channels for accel and gyro
+    for channel in accel.values() {
+        if channel.is_scan_element() {
+            channel.enable();
+        }
+    }
+    for channel in gyro.values() {
+        if channel.is_scan_element() {
+            channel.enable();
+        }
+    }
+
+    // Try to find and enable the timestamp channel
+    let timestamp_channel = device
+        .find_channel("timestamp", Direction::Input)
+        .filter(|ch| ch.is_scan_element());
+    if let Some(ref ts_ch) = timestamp_channel {
+        ts_ch.enable();
+        log::debug!("Enabled hardware timestamp channel");
+    }
+
+    // Try to set up a trigger
+    let owns_hrtimer = try_setup_trigger(device, ctx);
+
+    // Create the buffer (sample_count=1 for single-sample reads)
+    match device.create_buffer(1, false) {
+        Ok(buffer) => {
+            if let Err(e) = buffer.set_blocking_mode(true) {
+                log::warn!("Failed to set blocking mode on buffer: {e:?}");
+            }
+            log::info!("IIO buffer mode enabled successfully");
+            (Some(buffer), timestamp_channel, owns_hrtimer)
+        }
+        Err(e) => {
+            log::warn!("Failed to create IIO buffer: {e:?}, falling back to sysfs mode");
+            // Disable channels since we're not using buffer mode
+            for channel in accel.values() {
+                channel.disable();
+            }
+            for channel in gyro.values() {
+                channel.disable();
+            }
+            if let Some(ref ts_ch) = timestamp_channel {
+                ts_ch.disable();
+            }
+            (None, None, false)
+        }
+    }
+}
+
+/// Try to set up a trigger for the device. Returns true if we created an hrtimer trigger.
+fn try_setup_trigger(device: &Device, ctx: &industrial_io::context::Context) -> bool {
+    // Priority 1: Find device's own trigger
+    for dev in ctx.devices() {
+        if dev.is_trigger() {
+            if let Some(trigger_name) = dev.name() {
+                if let Some(device_name) = device.name() {
+                    // Match trigger to device (e.g., bmi323-dev0 trigger for bmi323)
+                    if trigger_name.starts_with(&device_name) {
+                        log::debug!("Found matching device trigger: {trigger_name}");
+                        if let Err(e) = device.set_trigger(&dev) {
+                            log::warn!("Failed to set device trigger: {e:?}");
+                        } else {
+                            log::info!("Using device trigger: {trigger_name}");
+                            // Try setting the sampling frequency
+                            try_set_sampling_frequency(device, DEFAULT_SAMPLE_RATE_HZ);
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Priority 2: Create an hrtimer trigger
+    let trigger_path = format!(
+        "/sys/kernel/config/iio/triggers/hrtimer/{}",
+        HRTIMER_TRIGGER_NAME
+    );
+    if !Path::new(&trigger_path).exists() {
+        if let Err(e) = fs::create_dir_all(&trigger_path) {
+            log::warn!("Failed to create hrtimer trigger at {trigger_path}: {e:?}");
+            return false;
+        }
+        log::debug!("Created hrtimer trigger at {trigger_path}");
+    }
+
+    // Find the hrtimer trigger device
+    // Re-scan the context to pick up the newly created trigger
+    let new_ctx = match industrial_io::context::Context::new() {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("Failed to create new IIO context for trigger: {e:?}");
+            return true;
+        }
+    };
+
+    for dev in new_ctx.devices() {
+        if dev.is_trigger() {
+            if let Some(trigger_name) = dev.name() {
+                if trigger_name == HRTIMER_TRIGGER_NAME {
+                    log::debug!("Found hrtimer trigger device: {trigger_name}");
+                    // Set the sampling frequency on the trigger
+                    if let Err(e) = dev.attr_write_float("sampling_frequency", DEFAULT_SAMPLE_RATE_HZ)
+                    {
+                        log::warn!("Failed to set hrtimer sampling frequency: {e:?}");
+                    }
+                    // Associate the trigger with the device
+                    if let Err(e) = device.set_trigger(&dev) {
+                        log::warn!("Failed to set hrtimer trigger: {e:?}");
+                    } else {
+                        log::info!(
+                            "Using hrtimer trigger at {DEFAULT_SAMPLE_RATE_HZ} Hz"
+                        );
+                    }
+                    return true;
+                }
+            }
+        }
+    }
+
+    log::warn!("Failed to find hrtimer trigger device after creation");
+    true
+}
+
+/// Try to set the sampling frequency on the device
+fn try_set_sampling_frequency(device: &Device, freq: f64) {
+    if let Err(e) = device.attr_write_float("sampling_frequency", freq) {
+        log::debug!("Failed to set device sampling frequency to {freq}: {e:?}");
+    } else {
+        log::info!("Set device sampling frequency to {freq} Hz");
+    }
+}
+
 /// Returns all channels and channel information from the given device matching
 /// the given channel type.
 fn get_channels_with_type(
@@ -261,7 +550,6 @@ fn get_channels_with_type(
             };
             log::debug!("Found channel: {id}");
 
-            // Get the offset of the axis
             let offset = match channel.attr_read_int("offset") {
                 Ok(v) => v,
                 Err(e) => {
@@ -270,7 +558,6 @@ fn get_channels_with_type(
                 }
             };
 
-            // Get the sample rate of the axis
             let sample_rate = match channel.attr_read_float("sampling_frequency") {
                 Ok(v) => v,
                 Err(e) => {
@@ -283,7 +570,6 @@ fn get_channels_with_type(
                 Ok(v) => {
                     let mut all_scales = Vec::new();
                     for val in v.split_whitespace() {
-                        // convert the string into f64
                         all_scales.push(val.parse::<f64>().unwrap());
                     }
                     all_scales
@@ -297,8 +583,6 @@ fn get_channels_with_type(
                 }
             };
 
-            // Get the scale of the axis to normalize values to meters per second or rads per
-            // second
             let scale = match channel.attr_read_float("scale") {
                 Ok(v) => v,
                 Err(e) => {
@@ -311,7 +595,6 @@ fn get_channels_with_type(
                 Ok(v) => {
                     let mut all_scales = Vec::new();
                     for val in v.split_whitespace() {
-                        // convert the string into f64
                         all_scales.push(val.parse::<f64>().unwrap());
                     }
                     all_scales
@@ -334,6 +617,13 @@ fn get_channels_with_type(
         });
 
     (channels, channel_info)
+}
+
+/// Returns true if any axis changed by more than the given threshold.
+fn axis_changed(current: &AxisData, prev: &AxisData, threshold: f64) -> bool {
+    (current.roll - prev.roll).abs() > threshold
+        || (current.pitch - prev.pitch).abs() > threshold
+        || (current.yaw - prev.yaw).abs() > threshold
 }
 
 fn is_driver_loaded(driver_name: &str) -> io::Result<bool> {
