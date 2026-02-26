@@ -34,8 +34,9 @@ pub enum InputValue {
         y: Option<f64>,
     },
     /// Vector3 values are typically used by IMU sensors to detect position and
-    /// velocity. The units of these values depend on the type of sensor the data
-    /// is coming from.
+    /// velocity. Standard internal units:
+    ///   - Gyroscope: degrees per second (deg/s)
+    ///   - Accelerometer: meters per second squared (m/s^2)
     Vector3 {
         x: Option<f64>,
         y: Option<f64>,

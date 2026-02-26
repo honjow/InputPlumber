@@ -270,26 +270,32 @@ impl HoripadSteamDevice {
             Capability::Gyroscope(_) => {
                 if let InputValue::Vector3 { x, y, z } = value {
                     if let Some(x) = x {
-                        self.state.pitch = Integer::from_primitive(x as i16);
+                        self.state.pitch =
+                            Integer::from_primitive(denormalize_gyro_value(x));
                     }
                     if let Some(y) = y {
-                        self.state.yaw = Integer::from_primitive(y as i16);
+                        self.state.yaw =
+                            Integer::from_primitive(denormalize_gyro_value(y));
                     }
                     if let Some(z) = z {
-                        self.state.roll = Integer::from_primitive(z as i16);
+                        self.state.roll =
+                            Integer::from_primitive(denormalize_gyro_value(z));
                     }
                 }
             }
             Capability::Accelerometer(_) => {
                 if let InputValue::Vector3 { x, y, z } = value {
                     if let Some(x) = x {
-                        self.state.accel_x = Integer::from_primitive(x as i16);
+                        self.state.accel_x =
+                            Integer::from_primitive(denormalize_accel_value(x));
                     }
                     if let Some(y) = y {
-                        self.state.accel_y = Integer::from_primitive(y as i16);
+                        self.state.accel_y =
+                            Integer::from_primitive(denormalize_accel_value(y));
                     }
                     if let Some(z) = z {
-                        self.state.accel_z = Integer::from_primitive(z as i16);
+                        self.state.accel_z =
+                            Integer::from_primitive(denormalize_accel_value(z));
                     }
                 }
             }
@@ -510,21 +516,17 @@ impl Debug for HoripadSteamDevice {
     }
 }
 
-/// De-normalizes the given value in meters per second into a real value that
-/// the controller understands.
-/// Accelerometer values are measured in []
-/// units of G acceleration (1G == 9.8m/s). InputPlumber accelerometer
-/// values are measured in units of meters per second. To denormalize
-/// the value, it needs to be converted into G units (by dividing by 9.8),
-/// then multiplying that value by the [].
-fn denormalize_accel_value(value_meters_sec: f64) -> i16 {
-    let value = value_meters_sec;
-    value as i16
+/// Horipad Steam uses same protocol as Steam Deck: 16 LSB per deg/s
+const HORIPAD_GYRO_RES: f64 = 16.0;
+/// Horipad Steam accel resolution: ~1632.65 LSB per m/s^2
+const HORIPAD_ACCEL_RES: f64 = 1.0 / 0.0006125;
+
+/// Convert m/s^2 to Horipad Steam accelerometer raw units.
+fn denormalize_accel_value(value_m_s2: f64) -> i16 {
+    (value_m_s2 * HORIPAD_ACCEL_RES).clamp(i16::MIN as f64, i16::MAX as f64) as i16
 }
 
-/// Horipad gyro values are measured in units of degrees per second.
-/// InputPlumber gyro values are also measured in degrees per second.
-fn denormalize_gyro_value(value_degrees_sec: f64) -> i16 {
-    let value = value_degrees_sec;
-    value as i16
+/// Convert deg/s to Horipad Steam gyro raw units.
+fn denormalize_gyro_value(value_deg_s: f64) -> i16 {
+    (value_deg_s * HORIPAD_GYRO_RES).clamp(i16::MIN as f64, i16::MAX as f64) as i16
 }

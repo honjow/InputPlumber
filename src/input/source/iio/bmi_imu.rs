@@ -107,16 +107,11 @@ fn translate_event(event: iio_imu::event::Event) -> NativeEvent {
             NativeEvent::new(cap, value)
         }
         iio_imu::event::Event::Gyro(data) => {
-            // Translate gyro values into the expected units of degrees per sec
-            // We apply a 12x scale so the lowest (default) value feels like natural 1:1 motion.
-            // Adjusting the scale will increase the granularity of the motion by slowing
-            // incrementing closer to 2:1 motion. From testing this is the highest scale we can
-            // apply before noise is amplified to the point the gyro cannot calibrate.
             let cap = Capability::Gamepad(Gamepad::Gyro);
             let value = InputValue::Vector3 {
-                x: Some(data.roll * (180.0 / PI) * 12.0),
-                y: Some(data.pitch * (180.0 / PI) * 12.0),
-                z: Some(data.yaw * (180.0 / PI) * 12.0),
+                x: Some(data.roll * (180.0 / PI)),
+                y: Some(data.pitch * (180.0 / PI)),
+                z: Some(data.yaw * (180.0 / PI)),
             };
             NativeEvent::new(cap, value)
         }

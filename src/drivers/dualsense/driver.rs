@@ -49,6 +49,9 @@ pub const TRIGGER_MAX: f64 = u8::MAX as f64;
 
 // DualSense hardware limits
 pub const DS5_ACC_RES_PER_G: u32 = 8192;
+/// Gyro resolution in LSB per deg/s, derived from the hardcoded calibration
+/// report: speed_2x(1080) * 1024 / (gyro_plus - gyro_minus)(~58693) ≈ 18.85
+pub const DS5_GYRO_RES_PER_DEG_S: f64 = 18.85;
 pub const DS5_TOUCHPAD_WIDTH: f64 = 1919.0;
 pub const DS5_TOUCHPAD_HEIGHT: f64 = 1079.0;
 

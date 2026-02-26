@@ -405,9 +405,10 @@ impl Debug for UnifiedGamepadDevice {
 /// Implementation to convert an InputPlumber [NativeEvent] into a Unified Controller [StateUpdate]
 impl From<NativeEvent> for StateUpdate {
     fn from(event: NativeEvent) -> Self {
-        // TODO: We need a consistent way to scale small float values to integers
-        const GYRO_SCALE_FACTOR: f64 = 10.0; // amount to scale imu data
-        const ACCEL_SCALE_FACTOR: f64 = 3000.0; // amount to scale imu data
+        // LSB per deg/s (consistent with Steam Deck protocol)
+        const GYRO_SCALE_FACTOR: f64 = 16.0;
+        // LSB per m/s^2 (consistent with Steam Deck protocol: 1 / 0.0006125)
+        const ACCEL_SCALE_FACTOR: f64 = 1632.6530612244898;
         let event_capability = event.as_capability();
         let capability = event_capability.clone().into();
         match event_capability {
@@ -466,9 +467,9 @@ impl From<NativeEvent> for StateUpdate {
                 Gamepad::Accelerometer => {
                     let value = match event.get_value() {
                         InputValue::Vector3 { x, y, z } => Int16Vector3Update {
-                            x: x.map(|x| (x * ACCEL_SCALE_FACTOR) as i16),
-                            y: y.map(|y| (y * ACCEL_SCALE_FACTOR) as i16),
-                            z: z.map(|z| (z * ACCEL_SCALE_FACTOR) as i16),
+                            x: x.map(|x| imu_to_i16(x, ACCEL_SCALE_FACTOR)),
+                            y: y.map(|y| imu_to_i16(y, ACCEL_SCALE_FACTOR)),
+                            z: z.map(|z| imu_to_i16(z, ACCEL_SCALE_FACTOR)),
                         },
                         _ => {
                             return Self::default();
@@ -481,9 +482,9 @@ impl From<NativeEvent> for StateUpdate {
                 Gamepad::Gyro => {
                     let value = match event.get_value() {
                         InputValue::Vector3 { x, y, z } => Int16Vector3Update {
-                            x: x.map(|x| (x * GYRO_SCALE_FACTOR) as i16),
-                            y: y.map(|y| (y * GYRO_SCALE_FACTOR) as i16),
-                            z: z.map(|z| (z * GYRO_SCALE_FACTOR) as i16),
+                            x: x.map(|x| imu_to_i16(x, GYRO_SCALE_FACTOR)),
+                            y: y.map(|y| imu_to_i16(y, GYRO_SCALE_FACTOR)),
+                            z: z.map(|z| imu_to_i16(z, GYRO_SCALE_FACTOR)),
                         },
                         _ => {
                             return Self::default();
@@ -689,9 +690,9 @@ impl From<NativeEvent> for StateUpdate {
             Capability::Gyroscope(_) => {
                 let value = match event.get_value() {
                     InputValue::Vector3 { x, y, z } => Int16Vector3Update {
-                        x: x.map(|x| (x * GYRO_SCALE_FACTOR) as i16),
-                        y: y.map(|y| (y * GYRO_SCALE_FACTOR) as i16),
-                        z: z.map(|z| (z * GYRO_SCALE_FACTOR) as i16),
+                        x: x.map(|x| imu_to_i16(x, GYRO_SCALE_FACTOR)),
+                        y: y.map(|y| imu_to_i16(y, GYRO_SCALE_FACTOR)),
+                        z: z.map(|z| imu_to_i16(z, GYRO_SCALE_FACTOR)),
                     },
                     _ => {
                         return Self::default();
@@ -704,9 +705,9 @@ impl From<NativeEvent> for StateUpdate {
             Capability::Accelerometer(_) => {
                 let value = match event.get_value() {
                     InputValue::Vector3 { x, y, z } => Int16Vector3Update {
-                        x: x.map(|x| (x * ACCEL_SCALE_FACTOR) as i16),
-                        y: y.map(|y| (y * ACCEL_SCALE_FACTOR) as i16),
-                        z: z.map(|z| (z * ACCEL_SCALE_FACTOR) as i16),
+                        x: x.map(|x| imu_to_i16(x, ACCEL_SCALE_FACTOR)),
+                        y: y.map(|y| imu_to_i16(y, ACCEL_SCALE_FACTOR)),
+                        z: z.map(|z| imu_to_i16(z, ACCEL_SCALE_FACTOR)),
                     },
                     _ => {
                         return Self::default();
@@ -1031,4 +1032,9 @@ impl From<Capability> for InputCapabilityInfo {
             Capability::Accelerometer(_) => Self::new(capability, ValueType::Int16Vector3),
         }
     }
+}
+
+/// Scale a physical-unit value to i16 with clamping to prevent truncation artifacts.
+fn imu_to_i16(value: f64, scale: f64) -> i16 {
+    (value * scale).clamp(i16::MIN as f64, i16::MAX as f64) as i16
 }

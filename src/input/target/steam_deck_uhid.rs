@@ -292,26 +292,26 @@ impl SteamDeckUhidDevice {
                 Gamepad::Accelerometer => {
                     if let InputValue::Vector3 { x, y, z } = value {
                         if let Some(x) = x {
-                            self.state.accel_x = Integer::from_primitive(x as i16);
+                            self.state.accel_x = Integer::from_primitive(deck_uhid_accel(x));
                         }
                         if let Some(y) = y {
-                            self.state.accel_y = Integer::from_primitive(y as i16);
+                            self.state.accel_y = Integer::from_primitive(deck_uhid_accel(y));
                         }
                         if let Some(z) = z {
-                            self.state.accel_z = Integer::from_primitive(z as i16);
+                            self.state.accel_z = Integer::from_primitive(deck_uhid_accel(z));
                         }
                     }
                 }
                 Gamepad::Gyro => {
                     if let InputValue::Vector3 { x, y, z } = value {
                         if let Some(x) = x {
-                            self.state.pitch = Integer::from_primitive(x as i16);
+                            self.state.pitch = Integer::from_primitive(deck_uhid_gyro(x));
                         }
                         if let Some(y) = y {
-                            self.state.yaw = Integer::from_primitive(y as i16);
+                            self.state.yaw = Integer::from_primitive(deck_uhid_gyro(y));
                         }
                         if let Some(z) = z {
-                            self.state.roll = Integer::from_primitive(z as i16);
+                            self.state.roll = Integer::from_primitive(deck_uhid_gyro(z));
                         }
                     }
                 }
@@ -383,26 +383,26 @@ impl SteamDeckUhidDevice {
             Capability::Gyroscope(_) => {
                 if let InputValue::Vector3 { x, y, z } = value {
                     if let Some(x) = x {
-                        self.state.pitch = Integer::from_primitive(x as i16);
+                        self.state.pitch = Integer::from_primitive(deck_uhid_gyro(x));
                     }
                     if let Some(y) = y {
-                        self.state.yaw = Integer::from_primitive(y as i16);
+                        self.state.yaw = Integer::from_primitive(deck_uhid_gyro(y));
                     }
                     if let Some(z) = z {
-                        self.state.roll = Integer::from_primitive(z as i16);
+                        self.state.roll = Integer::from_primitive(deck_uhid_gyro(z));
                     }
                 }
             }
             Capability::Accelerometer(_) => {
                 if let InputValue::Vector3 { x, y, z } = value {
                     if let Some(x) = x {
-                        self.state.accel_x = Integer::from_primitive(x as i16);
+                        self.state.accel_x = Integer::from_primitive(deck_uhid_accel(x));
                     }
                     if let Some(y) = y {
-                        self.state.accel_y = Integer::from_primitive(y as i16);
+                        self.state.accel_y = Integer::from_primitive(deck_uhid_accel(y));
                     }
                     if let Some(z) = z {
-                        self.state.accel_z = Integer::from_primitive(z as i16);
+                        self.state.accel_z = Integer::from_primitive(deck_uhid_accel(z));
                     }
                 }
             }
@@ -988,4 +988,17 @@ impl Debug for SteamDeckUhidDevice {
             .field("pressed_events", &self.pressed_events)
             .finish()
     }
+}
+
+/// Steam Deck gyro resolution: 16 LSB per deg/s
+const DECK_UHID_GYRO_RES: f64 = 16.0;
+/// Steam Deck accel resolution: ~1632.65 LSB per m/s^2
+const DECK_UHID_ACCEL_RES: f64 = 1.0 / 0.0006125;
+
+fn deck_uhid_gyro(value_deg_s: f64) -> i16 {
+    (value_deg_s * DECK_UHID_GYRO_RES).clamp(i16::MIN as f64, i16::MAX as f64) as i16
+}
+
+fn deck_uhid_accel(value_m_s2: f64) -> i16 {
+    (value_m_s2 * DECK_UHID_ACCEL_RES).clamp(i16::MIN as f64, i16::MAX as f64) as i16
 }

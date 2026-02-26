@@ -15,7 +15,7 @@ use crate::{
         dualsense::hid_report::SetStatePackedOutputData,
         steam_deck::{
             self,
-            driver::{Driver, ACCEL_SCALE},
+            driver::{Driver, ACCEL_SCALE, GYRO_SCALE},
             hid_report::LIZARD_SLEEP_SEC,
         },
     },
@@ -533,9 +533,9 @@ fn translate_event(event: steam_deck::event::Event) -> NativeEvent {
             steam_deck::event::AccelerometerEvent::Attitude(value) => NativeEvent::new(
                 Capability::Gamepad(Gamepad::Gyro),
                 InputValue::Vector3 {
-                    x: Some(value.x as f64),
-                    y: Some(value.y as f64),
-                    z: Some(value.z as f64),
+                    x: Some(value.x as f64 * GYRO_SCALE),
+                    y: Some(value.y as f64 * GYRO_SCALE),
+                    z: Some(value.z as f64 * GYRO_SCALE),
                 },
             ),
         },

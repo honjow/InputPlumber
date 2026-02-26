@@ -11,7 +11,8 @@ use uhid_virt::{Bus, CreateParams, StreamError, UHIDDevice};
 use crate::{
     drivers::dualsense::{
         driver::{
-            DS5_ACC_RES_PER_G, DS5_EDGE_NAME, DS5_EDGE_PID, DS5_EDGE_VERSION, DS5_EDGE_VID,
+            DS5_ACC_RES_PER_G, DS5_GYRO_RES_PER_DEG_S, DS5_EDGE_NAME, DS5_EDGE_PID,
+            DS5_EDGE_VERSION, DS5_EDGE_VID,
             DS5_NAME, DS5_PID, DS5_TOUCHPAD_HEIGHT, DS5_TOUCHPAD_WIDTH, DS5_VERSION, DS5_VID,
             FEATURE_REPORT_CALIBRATION, FEATURE_REPORT_FIRMWARE_INFO, FEATURE_REPORT_PAIRING_INFO,
             OUTPUT_REPORT_BT, OUTPUT_REPORT_BT_SIZE, OUTPUT_REPORT_USB,
@@ -1165,22 +1166,16 @@ impl Debug for DualSenseDevice {
     }
 }
 
-/// De-normalizes the given value in meters per second into a real value that
-/// the DS5 controller understands.
-/// DualSense accelerometer values are measured in [DS5_ACC_RES_PER_G]
-/// units of G acceleration (1G == 9.8m/s). InputPlumber accelerometer
-/// values are measured in units of meters per second. To denormalize
-/// the value, it needs to be converted into G units (by dividing by 9.8),
-/// then multiplying that value by the [DS5_ACC_RES_PER_G].
+/// Convert m/s^2 to DualSense accelerometer raw units.
+/// DualSense uses [DS5_ACC_RES_PER_G] LSB per G (1G = 9.8 m/s^2).
 fn denormalize_accel_value(value_meters_sec: f64) -> i16 {
-    let value_g = value_meters_sec / 9.8;
-    let value = value_g * DS5_ACC_RES_PER_G as f64;
-    value as i16
+    let value = value_meters_sec / 9.8 * DS5_ACC_RES_PER_G as f64;
+    value.clamp(i16::MIN as f64, i16::MAX as f64) as i16
 }
 
-/// DualSense gyro values are measured in units of degrees per second.
-/// InputPlumber gyro values are also measured in degrees per second.
+/// Convert deg/s to DualSense gyro raw units.
+/// DualSense uses [DS5_GYRO_RES_PER_DEG_S] LSB per deg/s.
 fn denormalize_gyro_value(value_degrees_sec: f64) -> i16 {
-    let value = value_degrees_sec;
-    value as i16
+    let value = value_degrees_sec * DS5_GYRO_RES_PER_DEG_S;
+    value.clamp(i16::MIN as f64, i16::MAX as f64) as i16
 }

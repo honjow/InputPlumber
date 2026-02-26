@@ -688,26 +688,26 @@ impl SteamDeckDevice {
                 Gamepad::Accelerometer => {
                     if let InputValue::Vector3 { x, y, z } = value {
                         if let Some(x) = x {
-                            self.state.accel_x = Integer::from_primitive(x as i16);
+                            self.state.accel_x = Integer::from_primitive(deck_accel(x));
                         }
                         if let Some(y) = y {
-                            self.state.accel_y = Integer::from_primitive(y as i16);
+                            self.state.accel_y = Integer::from_primitive(deck_accel(y));
                         }
                         if let Some(z) = z {
-                            self.state.accel_z = Integer::from_primitive(z as i16);
+                            self.state.accel_z = Integer::from_primitive(deck_accel(z));
                         }
                     }
                 }
                 Gamepad::Gyro => {
                     if let InputValue::Vector3 { x, y, z } = value {
                         if let Some(x) = x {
-                            self.state.pitch = Integer::from_primitive(x as i16);
+                            self.state.pitch = Integer::from_primitive(deck_gyro(x));
                         }
                         if let Some(y) = y {
-                            self.state.yaw = Integer::from_primitive(y as i16);
+                            self.state.yaw = Integer::from_primitive(deck_gyro(y));
                         }
                         if let Some(z) = z {
-                            self.state.roll = Integer::from_primitive(z as i16);
+                            self.state.roll = Integer::from_primitive(deck_gyro(z));
                         }
                     }
                 }
@@ -779,26 +779,26 @@ impl SteamDeckDevice {
             Capability::Gyroscope(_) => {
                 if let InputValue::Vector3 { x, y, z } = value {
                     if let Some(x) = x {
-                        self.state.pitch = Integer::from_primitive(x as i16);
+                        self.state.pitch = Integer::from_primitive(deck_gyro(x));
                     }
                     if let Some(y) = y {
-                        self.state.yaw = Integer::from_primitive(y as i16);
+                        self.state.yaw = Integer::from_primitive(deck_gyro(y));
                     }
                     if let Some(z) = z {
-                        self.state.roll = Integer::from_primitive(z as i16);
+                        self.state.roll = Integer::from_primitive(deck_gyro(z));
                     }
                 }
             }
             Capability::Accelerometer(_) => {
                 if let InputValue::Vector3 { x, y, z } = value {
                     if let Some(x) = x {
-                        self.state.accel_x = Integer::from_primitive(x as i16);
+                        self.state.accel_x = Integer::from_primitive(deck_accel(x));
                     }
                     if let Some(y) = y {
-                        self.state.accel_y = Integer::from_primitive(y as i16);
+                        self.state.accel_y = Integer::from_primitive(deck_accel(y));
                     }
                     if let Some(z) = z {
-                        self.state.accel_z = Integer::from_primitive(z as i16);
+                        self.state.accel_z = Integer::from_primitive(deck_accel(z));
                     }
                 }
             }
@@ -1136,4 +1136,19 @@ impl Debug for SteamDeckDevice {
 pub fn denormalize_unsigned_to_signed_value(normal_value: f64, min: f64, max: f64) -> i16 {
     let normal_value = (normal_value * 2.0) - 1.0;
     denormalize_signed_value_i16(normal_value, min, max)
+}
+
+/// Steam Deck gyro resolution: 1 raw unit = 0.0625 deg/s → 16 LSB per deg/s
+const DECK_GYRO_RES: f64 = 16.0;
+/// Steam Deck accel resolution: 1 raw unit = 0.0006125 m/s^2 → ~1632.65 LSB per m/s^2
+const DECK_ACCEL_RES: f64 = 1.0 / 0.0006125;
+
+/// Convert deg/s to Steam Deck gyro raw units.
+fn deck_gyro(value_deg_s: f64) -> i16 {
+    (value_deg_s * DECK_GYRO_RES).clamp(i16::MIN as f64, i16::MAX as f64) as i16
+}
+
+/// Convert m/s^2 to Steam Deck accelerometer raw units.
+fn deck_accel(value_m_s2: f64) -> i16 {
+    (value_m_s2 * DECK_ACCEL_RES).clamp(i16::MIN as f64, i16::MAX as f64) as i16
 }
