@@ -148,7 +148,8 @@ impl SourceInputDevice for DualSenseController {
     /// Poll the given input device for input events
     fn poll(&mut self) -> Result<Vec<NativeEvent>, InputError> {
         let events = self.driver.poll()?;
-        let native_events = translate_events(events);
+        let timestamp_us = self.driver.get_sensor_timestamp();
+        let native_events = translate_events(events, timestamp_us);
 
         Ok(native_events)
     }
@@ -226,12 +227,18 @@ impl Debug for DualSenseController {
 }
 
 /// Translate the given DualSense events into native events
-fn translate_events(events: Vec<dualsense::event::Event>) -> Vec<NativeEvent> {
-    events.into_iter().map(translate_event).collect()
+fn translate_events(
+    events: Vec<dualsense::event::Event>,
+    timestamp_us: Option<u64>,
+) -> Vec<NativeEvent> {
+    events
+        .into_iter()
+        .map(|e| translate_event(e, timestamp_us))
+        .collect()
 }
 
 /// Translate the given DualSense event into a native event
-fn translate_event(event: dualsense::event::Event) -> NativeEvent {
+fn translate_event(event: dualsense::event::Event, timestamp_us: Option<u64>) -> NativeEvent {
     match event {
         dualsense::event::Event::Button(button) => match button {
             dualsense::event::ButtonEvent::Cross(value) => NativeEvent::new(
@@ -328,22 +335,30 @@ fn translate_event(event: dualsense::event::Event) -> NativeEvent {
             ),
         },
         dualsense::event::Event::Accelerometer(accel) => match accel {
-            dualsense::event::AccelerometerEvent::Accelerometer(value) => NativeEvent::new(
-                Capability::Gamepad(Gamepad::Accelerometer),
-                InputValue::Vector3 {
+            dualsense::event::AccelerometerEvent::Accelerometer(value) => {
+                let cap = Capability::Gamepad(Gamepad::Accelerometer);
+                let val = InputValue::Vector3 {
                     x: Some(value.x as f64),
                     y: Some(value.y as f64),
                     z: Some(value.z as f64),
-                },
-            ),
-            dualsense::event::AccelerometerEvent::Gyro(value) => NativeEvent::new(
-                Capability::Gamepad(Gamepad::Gyro),
-                InputValue::Vector3 {
+                };
+                match timestamp_us {
+                    Some(ts) => NativeEvent::new_with_timestamp(cap, val, ts),
+                    None => NativeEvent::new(cap, val),
+                }
+            }
+            dualsense::event::AccelerometerEvent::Gyro(value) => {
+                let cap = Capability::Gamepad(Gamepad::Gyro);
+                let val = InputValue::Vector3 {
                     x: Some(value.x as f64),
                     y: Some(value.y as f64),
                     z: Some(value.z as f64),
-                },
-            ),
+                };
+                match timestamp_us {
+                    Some(ts) => NativeEvent::new_with_timestamp(cap, val, ts),
+                    None => NativeEvent::new(cap, val),
+                }
+            }
         },
         dualsense::event::Event::Axis(ref axis) => match axis {
             dualsense::event::AxisEvent::Pad(_) => NativeEvent::new(

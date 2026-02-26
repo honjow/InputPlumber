@@ -45,6 +45,11 @@ impl Driver {
         })
     }
 
+    /// Returns the frame counter from the most recent input report.
+    pub fn get_frame(&self) -> Option<u32> {
+        self.state.as_ref().map(|s| s.frame.to_primitive())
+    }
+
     /// Poll the device and read input reports
     pub fn poll(&mut self) -> Result<Vec<Event>, Box<dyn Error + Send + Sync>> {
         // Read data from the device into a buffer

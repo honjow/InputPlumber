@@ -2,7 +2,7 @@
 //! The DualSense implementation is based on the great work done by NeroReflex
 //! and the ROGueENEMY project:
 //! https://github.com/NeroReflex/ROGueENEMY/
-use std::{cmp::Ordering, error::Error, fmt::Debug, fs::File, time::Duration};
+use std::{cmp::Ordering, error::Error, fmt::Debug, fs::File, time::{Duration, Instant}};
 
 use packed_struct::prelude::*;
 use rand::Rng;
@@ -125,6 +125,8 @@ pub struct DualSenseDevice {
     context: u8,
     hardware: DualSenseHardware,
     queued_events: Vec<ScheduledNativeEvent>,
+    start_time: Instant,
+    has_pending_imu: bool,
 }
 
 impl DualSenseDevice {
@@ -138,6 +140,8 @@ impl DualSenseDevice {
             context: Default::default(),
             hardware,
             queued_events: Vec::new(),
+            start_time: Instant::now(),
+            has_pending_imu: false,
         })
     }
 
@@ -950,6 +954,14 @@ impl TargetInputDevice for DualSenseDevice {
             self.queued_events.push(south);
             return Ok(());
         }
+        let event_ts = event.get_timestamp_us();
+        let is_imu = matches!(
+            cap,
+            Capability::Gamepad(Gamepad::Gyro)
+                | Capability::Gamepad(Gamepad::Accelerometer)
+                | Capability::Gyroscope(_)
+                | Capability::Accelerometer(_)
+        );
         self.update_state(event);
 
         // Check if the timestamp needs to be updated
@@ -958,9 +970,15 @@ impl TargetInputDevice for DualSenseDevice {
             self.state.state_mut().touch_data.timestamp = self.timestamp;
         }
 
-        // Update the gyro timestamp
-        self.sensor_timestamp = self.sensor_timestamp.wrapping_add(3);
-        self.state.state_mut().sensor_timestamp = self.sensor_timestamp.into();
+        // Only update the sensor timestamp when new IMU data arrives
+        if is_imu {
+            self.sensor_timestamp = match event_ts {
+                Some(ts) => (ts % u32::MAX as u64) as u32,
+                None => self.start_time.elapsed().as_micros() as u32,
+            };
+            self.state.state_mut().sensor_timestamp = self.sensor_timestamp.into();
+            self.has_pending_imu = true;
+        }
 
         Ok(())
     }

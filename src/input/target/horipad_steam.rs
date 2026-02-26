@@ -324,6 +324,10 @@ impl HoripadSteamDevice {
 impl TargetInputDevice for HoripadSteamDevice {
     fn write_event(&mut self, event: NativeEvent) -> Result<(), InputError> {
         log::trace!("Received event: {event:?}");
+        if let Some(ts) = event.get_timestamp_us() {
+            let tick_ms = (ts / 1000 % u16::MAX as u64) as u16;
+            self.state.tick = Integer::from_primitive(tick_ms);
+        }
         self.update_state(event);
         Ok(())
     }

@@ -1105,20 +1105,22 @@ impl CompositeDevice {
         //TODO: Temporary force of all Gyro and Accel events to legacy Gamepad:: format.
         // Remove this after targets can handle translation profiles.
         if matches!(cap, Capability::Accelerometer(_)) {
-            let event = NativeEvent::new_translated(
+            let event = NativeEvent::new_translated_with_timestamp(
                 cap,
                 Capability::Gamepad(Gamepad::Accelerometer),
                 event.get_value(),
+                event.get_timestamp_us(),
             );
             self.targets.write_event(event).await;
             return Ok(());
         }
 
         if matches!(cap, Capability::Gyroscope(_)) {
-            let event = NativeEvent::new_translated(
+            let event = NativeEvent::new_translated_with_timestamp(
                 cap,
                 Capability::Gamepad(Gamepad::Gyro),
                 event.get_value(),
+                event.get_timestamp_us(),
             );
             self.targets.write_event(event).await;
             return Ok(());

@@ -97,23 +97,23 @@ fn translate_events(events: Vec<iio_imu::event::Event>) -> Vec<NativeEvent> {
 /// Translate the given driver event into a native event
 fn translate_event(event: iio_imu::event::Event) -> NativeEvent {
     match event {
-        iio_imu::event::Event::Accelerometer(data) => {
+        iio_imu::event::Event::Accelerometer(data, ts) => {
             let cap = Capability::Accelerometer(Source::Center);
             let value = InputValue::Vector3 {
                 x: Some(data.roll),
                 y: Some(data.pitch),
                 z: Some(data.yaw),
             };
-            NativeEvent::new(cap, value)
+            NativeEvent::new_with_timestamp(cap, value, ts)
         }
-        iio_imu::event::Event::Gyro(data) => {
+        iio_imu::event::Event::Gyro(data, ts) => {
             let cap = Capability::Gyroscope(Source::Center);
             let value = InputValue::Vector3 {
                 x: Some(data.roll * (180.0 / PI)),
                 y: Some(data.pitch * (180.0 / PI)),
                 z: Some(data.yaw * (180.0 / PI)),
             };
-            NativeEvent::new(cap, value)
+            NativeEvent::new_with_timestamp(cap, value, ts)
         }
     }
 }

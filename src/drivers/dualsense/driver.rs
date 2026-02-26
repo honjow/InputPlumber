@@ -88,6 +88,13 @@ impl Driver {
         })
     }
 
+    /// Returns the sensor timestamp (microseconds) from the most recent input report.
+    pub fn get_sensor_timestamp(&self) -> Option<u64> {
+        self.state.as_ref().map(|s| {
+            s.state().sensor_timestamp.to_primitive() as u64
+        })
+    }
+
     /// Poll the device and read input reports
     pub fn poll(&mut self) -> Result<Vec<Event>, Box<dyn Error + Send + Sync>> {
         // Read data from the device into a buffer

@@ -23,6 +23,8 @@ pub struct NativeEvent {
     /// as performance metrics and metadata. `Box<>` is used to allocate the
     /// context on the heap to reduce the size of [NativeEvent].
     context: Option<Box<EventContext>>,
+    /// Optional timestamp in microseconds for IMU events. `None` for non-IMU events.
+    timestamp_us: Option<u64>,
 }
 
 impl NativeEvent {
@@ -33,6 +35,22 @@ impl NativeEvent {
             value,
             source_capability: None,
             context: None,
+            timestamp_us: None,
+        }
+    }
+
+    /// Returns a new [NativeEvent] with a timestamp in microseconds
+    pub fn new_with_timestamp(
+        capability: Capability,
+        value: InputValue,
+        timestamp_us: u64,
+    ) -> NativeEvent {
+        NativeEvent {
+            capability,
+            value,
+            source_capability: None,
+            context: None,
+            timestamp_us: Some(timestamp_us),
         }
     }
 
@@ -48,6 +66,23 @@ impl NativeEvent {
             source_capability: Some(source_capability),
             value,
             context: None,
+            timestamp_us: None,
+        }
+    }
+
+    /// Returns a new translated [NativeEvent] preserving the source timestamp
+    pub fn new_translated_with_timestamp(
+        source_capability: Capability,
+        capability: Capability,
+        value: InputValue,
+        timestamp_us: Option<u64>,
+    ) -> NativeEvent {
+        NativeEvent {
+            capability,
+            source_capability: Some(source_capability),
+            value,
+            context: None,
+            timestamp_us,
         }
     }
 
@@ -92,6 +127,16 @@ impl NativeEvent {
     /// Returns the source capability that this event was translated from
     pub fn get_source_capability(&self) -> Option<Capability> {
         self.source_capability.clone()
+    }
+
+    /// Returns the IMU timestamp in microseconds, if present
+    pub fn get_timestamp_us(&self) -> Option<u64> {
+        self.timestamp_us
+    }
+
+    /// Set the IMU timestamp in microseconds
+    pub fn set_timestamp_us(&mut self, ts: u64) {
+        self.timestamp_us = Some(ts);
     }
 
     /// Returns whether or not the event is "pressed"
@@ -140,6 +185,7 @@ impl NativeEvent {
             value,
             source_capability: None,
             context: None,
+            timestamp_us: None,
         }
     }
 }
@@ -154,6 +200,7 @@ impl From<EvdevEvent> for NativeEvent {
             value,
             source_capability: None,
             context: None,
+            timestamp_us: None,
         }
     }
 }

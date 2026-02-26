@@ -86,6 +86,7 @@ pub struct SteamDeckDevice {
     queued_events: Vec<ScheduledNativeEvent>,
     serial_number: String,
     state: PackedInputDataReport,
+    has_pending_imu: bool,
 }
 
 impl SteamDeckDevice {
@@ -113,6 +114,7 @@ impl SteamDeckDevice {
             queued_events: vec![],
             serial_number: "1NPU7PLUMB3R".to_string(),
             state: PackedInputDataReport::default(),
+            has_pending_imu: false,
         })
     }
 
@@ -952,8 +954,20 @@ impl TargetInputDevice for SteamDeckDevice {
             }
         }
 
+        let is_imu = matches!(
+            cap,
+            Capability::Gamepad(Gamepad::Gyro)
+                | Capability::Gamepad(Gamepad::Accelerometer)
+                | Capability::Gyroscope(_)
+                | Capability::Accelerometer(_)
+        );
+
         // Update device state with input events
         self.update_state(event);
+
+        if is_imu {
+            self.has_pending_imu = true;
+        }
 
         Ok(())
     }
@@ -1074,9 +1088,12 @@ impl TargetOutputDevice for SteamDeckDevice {
             );
         }
 
-        // Increment the frame
-        let frame = self.state.frame.to_primitive();
-        self.state.frame = Integer::from_primitive(frame.wrapping_add(1));
+        // Only increment the frame counter when new IMU data has arrived
+        if self.has_pending_imu {
+            let frame = self.state.frame.to_primitive();
+            self.state.frame = Integer::from_primitive(frame.wrapping_add(1));
+            self.has_pending_imu = false;
+        }
 
         // Read from the device
         let xfer = {

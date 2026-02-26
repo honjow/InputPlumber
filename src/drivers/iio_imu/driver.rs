@@ -3,6 +3,7 @@ use std::{
     error::Error,
     fs::File,
     io::{self, BufRead, BufReader},
+    time::Instant,
 };
 
 use industrial_io::{Channel, ChannelType, Device, Direction};
@@ -26,6 +27,7 @@ pub struct Driver {
     gyro_info: HashMap<String, AxisInfo>,
     /// List of events that should not be generated
     filtered_events: HashSet<Capability>,
+    start_time: Instant,
 }
 
 impl Driver {
@@ -96,6 +98,7 @@ impl Driver {
             gyro,
             gyro_info,
             filtered_events: Default::default(),
+            start_time: Instant::now(),
         })
     }
 
@@ -181,7 +184,8 @@ impl Driver {
         }
         self.rotate_value(&mut accel_input);
 
-        Ok(Some(Event::Accelerometer(accel_input)))
+        let ts = self.start_time.elapsed().as_micros() as u64;
+        Ok(Some(Event::Accelerometer(accel_input, ts)))
     }
 
     /// Polls all the channels from the gyro
@@ -210,7 +214,8 @@ impl Driver {
         }
         self.rotate_value(&mut gyro_input);
 
-        Ok(Some(Event::Gyro(gyro_input)))
+        let ts = self.start_time.elapsed().as_micros() as u64;
+        Ok(Some(Event::Gyro(gyro_input, ts)))
     }
 
     /// Rotate the given axis data according to the mount matrix. This is used

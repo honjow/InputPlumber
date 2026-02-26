@@ -196,7 +196,9 @@ impl SourceInputDevice for DeckController {
         }
 
         let events = self.driver.poll()?;
-        let native_events = translate_events(events);
+        // Steam Deck frame counter runs at 250Hz (4ms per frame)
+        let timestamp_us = self.driver.get_frame().map(|f| f as u64 * 4000);
+        let native_events = translate_events(events, timestamp_us);
         Ok(native_events)
     }
 
@@ -400,12 +402,18 @@ fn normalize_trigger_value(event: steam_deck::event::TriggerEvent) -> InputValue
 }
 
 /// Translate the given Steam Deck events into native events
-fn translate_events(events: Vec<steam_deck::event::Event>) -> Vec<NativeEvent> {
-    events.into_iter().map(translate_event).collect()
+fn translate_events(
+    events: Vec<steam_deck::event::Event>,
+    timestamp_us: Option<u64>,
+) -> Vec<NativeEvent> {
+    events
+        .into_iter()
+        .map(|e| translate_event(e, timestamp_us))
+        .collect()
 }
 
 /// Translate the given Steam Deck event into a native event
-fn translate_event(event: steam_deck::event::Event) -> NativeEvent {
+fn translate_event(event: steam_deck::event::Event, timestamp_us: Option<u64>) -> NativeEvent {
     match event {
         steam_deck::event::Event::Button(button) => match button {
             steam_deck::event::ButtonEvent::A(value) => NativeEvent::new(
@@ -522,22 +530,30 @@ fn translate_event(event: steam_deck::event::Event) -> NativeEvent {
             ),
         },
         steam_deck::event::Event::Accelerometer(accel) => match accel {
-            steam_deck::event::AccelerometerEvent::Accelerometer(value) => NativeEvent::new(
-                Capability::Gamepad(Gamepad::Accelerometer),
-                InputValue::Vector3 {
+            steam_deck::event::AccelerometerEvent::Accelerometer(value) => {
+                let cap = Capability::Gamepad(Gamepad::Accelerometer);
+                let val = InputValue::Vector3 {
                     x: Some(value.x as f64 * ACCEL_SCALE),
                     y: Some(value.y as f64 * ACCEL_SCALE),
                     z: Some(value.z as f64 * ACCEL_SCALE),
-                },
-            ),
-            steam_deck::event::AccelerometerEvent::Attitude(value) => NativeEvent::new(
-                Capability::Gamepad(Gamepad::Gyro),
-                InputValue::Vector3 {
+                };
+                match timestamp_us {
+                    Some(ts) => NativeEvent::new_with_timestamp(cap, val, ts),
+                    None => NativeEvent::new(cap, val),
+                }
+            }
+            steam_deck::event::AccelerometerEvent::Attitude(value) => {
+                let cap = Capability::Gamepad(Gamepad::Gyro);
+                let val = InputValue::Vector3 {
                     x: Some(value.x as f64 * GYRO_SCALE),
                     y: Some(value.y as f64 * GYRO_SCALE),
                     z: Some(value.z as f64 * GYRO_SCALE),
-                },
-            ),
+                };
+                match timestamp_us {
+                    Some(ts) => NativeEvent::new_with_timestamp(cap, val, ts),
+                    None => NativeEvent::new(cap, val),
+                }
+            }
         },
         steam_deck::event::Event::Axis(axis) => match axis.clone() {
             steam_deck::event::AxisEvent::LPad(_) => NativeEvent::new(
