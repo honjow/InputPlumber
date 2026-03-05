@@ -34,6 +34,14 @@ source_devices:
       vendor_id: "0db0"
       product_id: "1901"
       phys_path: "usb-0000:c6:00.0-3/input0"
+
+  # Xinput remapping gamepad
+  - group: gamepad
+    evdev:
+      vendor_id: "0db0"
+      product_id: "1901"
+      phys_path: "usb-0000:c6:00.0-3/input2"
+
   - group: gamepad
     passthrough: true
     hidraw:
