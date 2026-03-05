@@ -44,6 +44,10 @@ source_devices:
       phys_path: usb-0000:c4:00.3-2.2/input0
       handler: event*
   - group: gamepad
+    hidraw:
+      vendor_id: 0x1a86
+      product_id: 0xfe00
+  - group: gamepad
     udev:
       id_vendor: "1a86"
       id_product: "7523"
