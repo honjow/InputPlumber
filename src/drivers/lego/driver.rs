@@ -62,6 +62,22 @@ impl Driver {
             return Err(format!("Device '{fmtpath}' is not a Legion Go S Controller").into());
         }
 
+        // Enable gyroscope and high-quality IMU reports for both controllers.
+        // Without these commands the XInput report bytes 41-46 (high-quality
+        // gyro) remain zero. Left controller = 0x03, Right = 0x04.
+        for rc in [0x03u8, 0x04u8] {
+            // Enable gyro
+            if let Err(e) = hid_device.write(&[0x05, 0x06, 0x6A, 0x02, rc, 0x01, 0x01]) {
+                log::warn!("Failed to enable gyro for controller 0x{rc:02x}: {e:?}");
+            }
+            // Enable high-quality report
+            if let Err(e) = hid_device.write(&[0x05, 0x06, 0x6A, 0x07, rc, 0x02, 0x01]) {
+                log::warn!(
+                    "Failed to enable high-quality IMU report for controller 0x{rc:02x}: {e:?}"
+                );
+            }
+        }
+
         Ok(Self {
             udev_device,
             hid_device,
