@@ -146,14 +146,9 @@ source_devices:
       product_id: 0x61ee
       interface_num: 2
 
-  # IMU
-  - group: imu
-    iio:
-      name: gyro_3d
-      mount_matrix:
-        x: [0, 1, 0]
-        y: [1, 0, 0]
-        z: [0, 0, 1]
+  # The Legion Go's AMD SFH HID Sensor Hub (gyro_3d/accel_3d IIO) has a very
+  # small usable range (+/-1.24 deg/s), making it unsuitable for game control.
+  # IMU data is sourced from the Left/Right controller BMI260 via HIDRAW instead.
 
 # Optional configuration for the composite device
 options:
