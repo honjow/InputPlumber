@@ -5,8 +5,12 @@ use std::{error::Error, ffi::CString, time::Duration};
 
 use hidapi::HidDevice;
 use packed_struct::PackedStruct;
+use udev::Device;
 
-use crate::{drivers::msi_claw::hid_report::Command, udev::device::UdevDevice};
+use crate::{
+    drivers::msi_claw::hid_report::Command,
+    udev::device::{AttributeSetter, UdevDevice},
+};
 
 use super::hid_report::{GamepadMode, MkeysFunction, PackedCommandReport};
 
@@ -24,6 +28,11 @@ impl Driver {
         let pid = udevice.id_product();
         if VID != vid || PID != pid {
             return Err(format!("'{}' is not a MSI Claw controller", udevice.devnode()).into());
+        }
+
+        // Try to configure M1/M2 buttons via sysfs if kernel driver supports it
+        if let Ok(device) = udevice.get_device() {
+            configure_m_remap(device);
         }
 
         // Open the hidraw device
@@ -96,5 +105,20 @@ impl Driver {
         self.device.write(&data)?;
 
         Ok(())
+    }
+}
+
+/// Configure M1/M2 button remapping via sysfs (requires hid-msi-claw kernel driver)
+fn configure_m_remap(mut device: Device) {
+    // M1 -> KEY_INSERT, M2 -> KEY_DELETE
+    // These will be captured by InputPlumber and mapped via capability_maps
+    set_attribute(&mut device, "m1_remap", "KEY_INSERT");
+    set_attribute(&mut device, "m2_remap", "KEY_DELETE");
+}
+
+fn set_attribute(device: &mut Device, attribute: &str, value: &str) {
+    match device.set_attribute_on_tree(attribute, value) {
+        Ok(_) => log::debug!("Set {attribute} to {value}"),
+        Err(e) => log::debug!("Could not set {attribute} to {value}: {e:?}"),
     }
 }
