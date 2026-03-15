@@ -1,0 +1,62 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/ShadowBlip/InputPlumber/main/rootfs/usr/share/inputplumber/schema/composite_device_v1.json
+# Schema version number
+version: 1
+
+# The type of configuration schema
+kind: CompositeDevice
+
+# Name of the composite device mapping
+name: ONEXPLAYER APEX
+
+# Only allow a single source device per composite device of this type.
+single_source: false
+
+# Only use this profile if *any* of the given matches matches. If this list is
+# empty, then the source devices will *always* be checked.
+# /sys/class/dmi/id/product_name
+matches:
+  - dmi_data:
+      product_name: ONEXPLAYER APEX
+      sys_vendor: ONE-NETBOOK
+
+# One or more source devices to combine into a single virtual device. The events
+# from these devices will be watched and translated according to the key map.
+source_devices:
+  # Standard Xbox gamepad (xpad driver)
+  # TODO: Add phys_path when hardware data is available
+  - group: gamepad
+    evdev:
+      name: Microsoft X-Box 360 pad
+      handler: event*
+  # AT keyboard — volume buttons come from here on the Apex
+  - group: keyboard
+    evdev:
+      name: AT Translated Set 2 keyboard
+      phys_path: isa0060/serio0/input0
+      handler: event*
+  # Vendor HID keyboard (1a86:fe00) — Home/Turbo/KB combo keys
+  # This device creates multiple evdev interfaces; the keyboard interface
+  # (input0) is the one that sends the button combos.
+  # TODO: Add phys_path when hardware data is available to disambiguate
+  #       from the mouse/consumer-control/system-control interfaces.
+  - group: keyboard
+    evdev:
+      name: HID 1a86:fe00
+      handler: event*
+  # IMU — likely BMI260 (same as X1), needs hardware verification
+  - group: imu
+    iio:
+      name: "{i2c-BMI0160:00,i2c-BMI0260:00,i2c-BOSC0260:00,bmi260}"
+
+# Optional configuration for the composite device
+options:
+  auto_manage: true
+
+# The target input device(s) to emulate by default
+target_devices:
+  - xbox-series
+  - mouse
+  - keyboard
+
+# The ID of a device event mapping in the 'capability_maps' folder
+capability_map_id: oxp8

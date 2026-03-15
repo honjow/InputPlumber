@@ -1,0 +1,48 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/ShadowBlip/InputPlumber/main/rootfs/usr/share/inputplumber/schema/capability_map_v1.json
+# Schema version number
+version: 1
+
+# The type of configuration schema
+kind: CapabilityMap
+
+# Name for the device event map
+name: OneXPlayer Type 8
+
+# Unique identifier of the capability mapping
+id: oxp8
+
+# List of mapped events that are activated by a specific set of activation keys.
+#
+# Apex front buttons (beyond standard Xbox controls):
+#   Home/Orange: KEY_G + KEY_LEFTMETA
+#   Turbo:       KEY_LEFTCTRL + KEY_LEFTALT + KEY_LEFTMETA
+#   KB/QAM:      KEY_O + KEY_RIGHTCTRL + KEY_LEFTMETA
+#
+# Note: On the Apex, KEY_G is the Home button (other OXP devices use KEY_D).
+mapping:
+  - name: Home (Orange Button)
+    source_events:
+      - keyboard: KeyLeftMeta
+      - keyboard: KeyG
+    target_event:
+      gamepad:
+        button: Guide
+  - name: Turbo
+    source_events:
+      - keyboard: KeyLeftCtrl
+      - keyboard: KeyLeftAlt
+      - keyboard: KeyLeftMeta
+    target_event:
+      gamepad:
+        button: QuickAccess
+  - name: KB/QAM
+    source_events:
+      - keyboard: KeyRightCtrl
+      - keyboard: KeyLeftMeta
+      - keyboard: KeyO
+    target_event:
+      gamepad:
+        button: Keyboard
+
+# List of events to filter from the source devices
+filtered_events: []
