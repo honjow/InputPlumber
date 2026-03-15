@@ -35,14 +35,14 @@ source_devices:
       phys_path: isa0060/serio0/input0
       handler: event*
   # Vendor HID keyboard (1a86:fe00) — Home/Turbo/KB combo keys
-  # This device creates multiple evdev interfaces; the keyboard interface
-  # (input0) is the one that sends the button combos.
-  # TODO: Add phys_path when hardware data is available to disambiguate
-  #       from the mouse/consumer-control/system-control interfaces.
+  # This device creates multiple evdev interfaces; required_keys narrows
+  # the match to the keyboard interface that reports KEY_G.
   - group: keyboard
     evdev:
       name: HID 1a86:fe00
       handler: event*
+      required_keys:
+        - KeyG
   # IMU — likely BMI260 (same as X1), needs hardware verification
   - group: imu
     iio:
