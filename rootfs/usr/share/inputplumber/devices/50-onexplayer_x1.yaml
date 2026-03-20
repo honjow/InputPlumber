@@ -59,6 +59,21 @@ source_devices:
     iio:
       name: "{i2c-BMI0260:00,bmi260}"
 
+  # External / docked controllers: joined dock supplies power and 2.4 GHz to the
+  # handheld. The gamepad entry is the receiver's XInput-style device; the fe02
+  # HID is companion keys on that receiver path. Absent when controllers are
+  # attached directly to the unit.
+  - group: gamepad
+    evdev:
+      name: Microsoft X-Box 360 pad
+      phys_path: usb-0000:c4:00.3-1.1/input0
+      handler: event*
+  - group: keyboard
+    evdev:
+      name: HID 1a86:fe02
+      phys_path: usb-0000:c4:00.3-1.2/input0
+      handler: event*
+
 # Optional configuration for the composite device
 options:
   # If true, InputPlumber will automatically try to manage the input device. If
