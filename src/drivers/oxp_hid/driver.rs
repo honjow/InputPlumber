@@ -116,8 +116,26 @@ fn gen_vibration_cmd(strength: u8) -> [u8; PACKET_SIZE] {
     gen_cmd(0xB3, &data)
 }
 
-/// Clamp -32768 to -32767 so that normalizing by /32767 stays within [-1.0, 1.0].
-fn clamp_axis_raw(raw: i16) -> i16 {
+const AXIS_OVERFLOW_THRESHOLD: f64 = 1.5;
+
+/// Normalize a raw i16 axis value to [-1.0, 1.0], then correct for possible
+/// overflow. Some OXP devices (e.g. Apex) have sticks whose physical range
+/// exceeds i16, causing the raw value to wrap around at full deflection
+/// (e.g. a large positive value wraps to -32768). If the normalized value
+/// jumps by more than 1.5 from the previous frame, we treat it as overflow
+/// and clamp to the previous direction's extreme. This is a no-op on devices
+/// without overflow since normal stick movement never exceeds this threshold.
+fn correct_axis_overflow(raw: i16, prev: &mut Option<f64>) -> i16 {
+    let normalized = raw as f64 / 32768.0;
+    if let Some(prev_val) = *prev {
+        let delta = (normalized - prev_val).abs();
+        if delta > AXIS_OVERFLOW_THRESHOLD {
+            let corrected = if prev_val > 0.0 { 1.0 } else { -1.0 };
+            *prev = Some(corrected);
+            return if corrected > 0.0 { 32767 } else { -32767 };
+        }
+    }
+    *prev = Some(normalized);
     raw.max(-32767)
 }
 
@@ -127,6 +145,13 @@ pub struct Driver {
     // Button state for debouncing
     btn_state: [bool; 0x25],
     initialized: bool,
+    // Previous normalized axis values for overflow detection.
+    // Some OXP devices (e.g. Apex) have analog sticks whose physical range
+    // exceeds signed 16-bit, causing the raw value to wrap around at full
+    // deflection. We detect this by checking if the normalized value jumped
+    // by more than 1.5 between frames (impossible for real stick movement),
+    // and clamp to the previous direction's extreme when it happens.
+    prev_axes: [Option<f64>; 4], // [LX, LY, RX, RY]
 }
 
 impl Driver {
@@ -147,6 +172,7 @@ impl Driver {
             intercept,
             btn_state: [false; 0x25],
             initialized: false,
+            prev_axes: [None; 4],
         })
     }
 
@@ -320,23 +346,18 @@ impl Driver {
                 let lt_raw = buf[15];
                 let rt_raw = buf[16];
 
-                // bytes[17:19] = LX (signed 16-bit LE)
-                let lx = i16::from_le_bytes([buf[17], buf[18]]);
-                // bytes[19:21] = LY (signed 16-bit LE, needs inversion)
-                let ly = i16::from_le_bytes([buf[19], buf[20]]);
-                // bytes[21:23] = RX (signed 16-bit LE)
-                let rx = i16::from_le_bytes([buf[21], buf[22]]);
-                // bytes[23:25] = RY (signed 16-bit LE, needs inversion)
-                let ry = i16::from_le_bytes([buf[23], buf[24]]);
+                let lx_raw = i16::from_le_bytes([buf[17], buf[18]]);
+                let ly_raw = i16::from_le_bytes([buf[19], buf[20]]);
+                let rx_raw = i16::from_le_bytes([buf[21], buf[22]]);
+                let ry_raw = i16::from_le_bytes([buf[23], buf[24]]);
 
-                events.push(Event::Axis(AxisEvent::LStick(AxisInput {
-                    x: clamp_axis_raw(lx),
-                    y: clamp_axis_raw(ly),
-                })));
-                events.push(Event::Axis(AxisEvent::RStick(AxisInput {
-                    x: clamp_axis_raw(rx),
-                    y: clamp_axis_raw(ry),
-                })));
+                let lx = correct_axis_overflow(lx_raw, &mut self.prev_axes[0]);
+                let ly = correct_axis_overflow(ly_raw, &mut self.prev_axes[1]);
+                let rx = correct_axis_overflow(rx_raw, &mut self.prev_axes[2]);
+                let ry = correct_axis_overflow(ry_raw, &mut self.prev_axes[3]);
+
+                events.push(Event::Axis(AxisEvent::LStick(AxisInput { x: lx, y: ly })));
+                events.push(Event::Axis(AxisEvent::RStick(AxisInput { x: rx, y: ry })));
                 events.push(Event::Trigger(TriggerEvent::LTrigger(TriggerInput {
                     value: lt_raw,
                 })));
