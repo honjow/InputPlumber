@@ -15,9 +15,25 @@ id: oxp8
 #   Verified: Turbo (Ctrl+Alt+Meta); KB short (LeftCtrl+Meta+O); Orange short (Meta+G -> Guide).
 #   Not verified: Orange long (Meta+D -> QuickAccess2) — no long-press capture yet; chord guessed from F1 oxp7 swap.
 #   Not verified: Turbo+Orange (Meta+Sysrq); KB+Orange (RightCtrl+RightAlt+Delete) — copied from oxp7, not tested on Apex.
-# Back grip buttons: not mapped here (MCU may change evdev codes; pass-through from xpad).
+# Back grip buttons: HID 0x22 = physical right, 0x23 = physical left on Apex.
+# Driver reports 0x22 as LeftPaddle1 and 0x23 as RightPaddle1 (matching X1 Mini),
+# so swap them here for Apex.
 
 mapping:
+  - name: Left Back Paddle
+    source_events:
+      - gamepad:
+          button: LeftPaddle1
+    target_event:
+      gamepad:
+        button: RightPaddle1
+  - name: Right Back Paddle
+    source_events:
+      - gamepad:
+          button: RightPaddle1
+    target_event:
+      gamepad:
+        button: LeftPaddle1
   - name: Turbo
     source_events:
       - keyboard: KeyLeftCtrl
