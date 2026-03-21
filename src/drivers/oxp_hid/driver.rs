@@ -21,8 +21,9 @@ const CMD_BUTTON: u8 = 0xB2;
 // Button codes (shared between non-intercept and intercept modes)
 const BTN_A: u8 = 0x01;
 const BTN_B: u8 = 0x02;
-const BTN_X: u8 = 0x03;
-const BTN_Y: u8 = 0x04;
+// OXP firmware reports X/Y swapped: physical X sends 0x04, physical Y sends 0x03
+const BTN_X: u8 = 0x04;
+const BTN_Y: u8 = 0x03;
 const BTN_LB: u8 = 0x05;
 const BTN_RB: u8 = 0x06;
 // 0x07 = LT digital, 0x08 = RT digital (ignored in intercept, use analog instead)
