@@ -3,6 +3,7 @@ pub mod dualsense;
 pub mod flydigi_vader_4_pro;
 pub mod fts3528;
 pub mod gpd_win5_buttons;
+pub mod generic_buttons;
 pub mod gpd_win_mini_touchpad;
 pub mod gpd_win_mini_macro_keyboard;
 pub mod horipad_steam;
@@ -23,6 +24,7 @@ use std::{error::Error, time::Duration};
 use blocked::BlockedHidrawDevice;
 use flydigi_vader_4_pro::Vader4Pro;
 use gpd_win5_buttons::GpdWin5Buttons;
+use generic_buttons::GenericHidrawButtons;
 use gpd_win_mini_touchpad::GpdWinMiniTouchpad;
 use gpd_win_mini_macro_keyboard::GpdWinMiniMacroKeyboard;
 use horipad_steam::HoripadSteam;
@@ -35,12 +37,18 @@ use xpad_uhid::XpadUhid;
 use zotac_zone::ZotacZone;
 
 use crate::{
-    config,
+    config::{
+        self,
+        capability_map::{load_capability_mappings, CapabilityMapConfig, CapabilityMapConfigV2},
+    },
     constants::BUS_SOURCES_PREFIX,
     drivers,
     input::{
-        capability::Capability, composite_device::client::CompositeDeviceClient,
-        info::DeviceInfoRef, output_capability::OutputCapability,
+        capability::Capability,
+        composite_device::client::CompositeDeviceClient,
+        event::hidraw::translator::HidrawEventTranslator,
+        info::DeviceInfoRef,
+        output_capability::OutputCapability,
     },
     udev::device::UdevDevice,
 };
@@ -83,6 +91,7 @@ pub enum HidRawDevice {
     DualSense(SourceDriver<DualSenseController>),
     Fts3528Touchscreen(SourceDriver<Fts3528Touchscreen>),
     GpdWin5Buttons(SourceDriver<GpdWin5Buttons>),
+    GenericButtons(SourceDriver<GenericHidrawButtons>),
     GpdWinMiniTouchpad(SourceDriver<GpdWinMiniTouchpad>),
     GpdWinMiniMacroKeyboard(SourceDriver<GpdWinMiniMacroKeyboard>),
     HoripadSteam(SourceDriver<HoripadSteam>),
@@ -107,6 +116,7 @@ impl SourceDeviceCompatible for HidRawDevice {
             HidRawDevice::DualSense(source_driver) => source_driver.info_ref(),
             HidRawDevice::Fts3528Touchscreen(source_driver) => source_driver.info_ref(),
             HidRawDevice::GpdWin5Buttons(source_driver) => source_driver.info_ref(),
+            HidRawDevice::GenericButtons(source_driver) => source_driver.info_ref(),
             HidRawDevice::GpdWinMiniTouchpad(source_driver) => source_driver.info_ref(),
             HidRawDevice::GpdWinMiniMacroKeyboard(source_driver) => source_driver.info_ref(),
             HidRawDevice::HoripadSteam(source_driver) => source_driver.info_ref(),
@@ -131,6 +141,7 @@ impl SourceDeviceCompatible for HidRawDevice {
             HidRawDevice::DualSense(source_driver) => source_driver.get_id(),
             HidRawDevice::Fts3528Touchscreen(source_driver) => source_driver.get_id(),
             HidRawDevice::GpdWin5Buttons(source_driver) => source_driver.get_id(),
+            HidRawDevice::GenericButtons(source_driver) => source_driver.get_id(),
             HidRawDevice::GpdWinMiniTouchpad(source_driver) => source_driver.get_id(),
             HidRawDevice::GpdWinMiniMacroKeyboard(source_driver) => source_driver.get_id(),
             HidRawDevice::HoripadSteam(source_driver) => source_driver.get_id(),
@@ -155,6 +166,7 @@ impl SourceDeviceCompatible for HidRawDevice {
             HidRawDevice::DualSense(source_driver) => source_driver.client(),
             HidRawDevice::Fts3528Touchscreen(source_driver) => source_driver.client(),
             HidRawDevice::GpdWin5Buttons(source_driver) => source_driver.client(),
+            HidRawDevice::GenericButtons(source_driver) => source_driver.client(),
             HidRawDevice::GpdWinMiniTouchpad(source_driver) => source_driver.client(),
             HidRawDevice::GpdWinMiniMacroKeyboard(source_driver) => source_driver.client(),
             HidRawDevice::HoripadSteam(source_driver) => source_driver.client(),
@@ -179,6 +191,7 @@ impl SourceDeviceCompatible for HidRawDevice {
             HidRawDevice::DualSense(source_driver) => source_driver.run().await,
             HidRawDevice::Fts3528Touchscreen(source_driver) => source_driver.run().await,
             HidRawDevice::GpdWin5Buttons(source_driver) => source_driver.run().await,
+            HidRawDevice::GenericButtons(source_driver) => source_driver.run().await,
             HidRawDevice::GpdWinMiniTouchpad(source_driver) => source_driver.run().await,
             HidRawDevice::GpdWinMiniMacroKeyboard(source_driver) => source_driver.run().await,
             HidRawDevice::HoripadSteam(source_driver) => source_driver.run().await,
@@ -203,6 +216,7 @@ impl SourceDeviceCompatible for HidRawDevice {
             HidRawDevice::DualSense(source_driver) => source_driver.get_capabilities(),
             HidRawDevice::Fts3528Touchscreen(source_driver) => source_driver.get_capabilities(),
             HidRawDevice::GpdWin5Buttons(source_driver) => source_driver.get_capabilities(),
+            HidRawDevice::GenericButtons(source_driver) => source_driver.get_capabilities(),
             HidRawDevice::GpdWinMiniTouchpad(source_driver) => source_driver.get_capabilities(),
             HidRawDevice::GpdWinMiniMacroKeyboard(source_driver) => source_driver.get_capabilities(),
             HidRawDevice::HoripadSteam(source_driver) => source_driver.get_capabilities(),
@@ -229,6 +243,9 @@ impl SourceDeviceCompatible for HidRawDevice {
                 source_driver.get_output_capabilities()
             }
             HidRawDevice::GpdWin5Buttons(source_driver) => {
+                source_driver.get_output_capabilities()
+            }
+            HidRawDevice::GenericButtons(source_driver) => {
                 source_driver.get_output_capabilities()
             }
             HidRawDevice::GpdWinMiniTouchpad(source_driver) => {
@@ -261,6 +278,7 @@ impl SourceDeviceCompatible for HidRawDevice {
             HidRawDevice::DualSense(source_driver) => source_driver.get_device_path(),
             HidRawDevice::Fts3528Touchscreen(source_driver) => source_driver.get_device_path(),
             HidRawDevice::GpdWin5Buttons(source_driver) => source_driver.get_device_path(),
+            HidRawDevice::GenericButtons(source_driver) => source_driver.get_device_path(),
             HidRawDevice::GpdWinMiniTouchpad(source_driver) => source_driver.get_device_path(),
             HidRawDevice::GpdWinMiniMacroKeyboard(source_driver) => source_driver.get_device_path(),
             HidRawDevice::HoripadSteam(source_driver) => source_driver.get_device_path(),
@@ -293,7 +311,25 @@ impl HidRawDevice {
         let driver_type = HidRawDevice::get_driver_type(&device_info, is_blocked);
 
         match driver_type {
-            DriverType::Unknown => Err("No driver for hidraw interface found".into()),
+            DriverType::Unknown => {
+                if let Some(cap_map) = Self::load_hidraw_capability_map(&conf) {
+                    log::info!(
+                        "Using generic hidraw button driver with capability map '{}'",
+                        cap_map.name,
+                    );
+                    let device = GenericHidrawButtons::new(device_info.clone(), cap_map)?;
+                    let source_device =
+                        SourceDriver::new(composite_device, device, device_info.into(), conf);
+                    return Ok(Self::GenericButtons(source_device));
+                }
+
+                let vid = device_info.id_vendor();
+                let pid = device_info.id_product();
+                Err(format!(
+                    "No driver for hidraw interface found. VID: {vid:#06x}, PID: {pid:#06x}"
+                )
+                .into())
+            }
             DriverType::Blocked => {
                 let options = SourceDriverOptions {
                     poll_rate: Duration::from_millis(200),
@@ -498,6 +534,26 @@ impl HidRawDevice {
         }
     }
 
+    fn load_hidraw_capability_map(
+        conf: &Option<config::SourceDevice>,
+    ) -> Option<CapabilityMapConfigV2> {
+        let cap_map_id = conf.as_ref()?.capability_map_id.as_ref()?;
+        let mappings = load_capability_mappings();
+        let cap_map = match mappings.get(cap_map_id) {
+            Some(CapabilityMapConfig::V2(config)) => config.clone(),
+            _ => {
+                log::warn!("Capability map '{cap_map_id}' not found or not V2");
+                return None;
+            }
+        };
+
+        if !HidrawEventTranslator::has_hidraw_mappings(&cap_map) {
+            return None;
+        }
+
+        Some(cap_map)
+    }
+
     /// Return the driver type for the given vendor and product
     fn get_driver_type(device: &UdevDevice, is_blocked: bool) -> DriverType {
         log::debug!("Finding driver for interface: {:?}", device);
@@ -653,8 +709,7 @@ impl HidRawDevice {
             return DriverType::GpdWinMiniMacroKeyboard;
         }
 
-        // Unknown
-        log::warn!("No driver for hidraw interface found. VID: {vid}, PID: {pid}");
+        log::debug!("No specialized hidraw driver for VID: {vid:#06x}, PID: {pid:#06x}");
         DriverType::Unknown
     }
 }
