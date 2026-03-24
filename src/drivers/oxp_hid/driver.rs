@@ -118,19 +118,49 @@ fn gen_vibration_cmd(strength: u8) -> [u8; PACKET_SIZE] {
 
 const AXIS_OVERFLOW_THRESHOLD: f64 = 1.5;
 
-/// Normalize a raw i16 axis value to [-1.0, 1.0], then correct for possible
-/// overflow. Some OXP devices (e.g. Apex) have sticks whose physical range
-/// exceeds i16, causing the raw value to wrap around at full deflection
-/// (e.g. a large positive value wraps to -32768). If the normalized value
-/// jumps by more than 1.5 from the previous frame, we treat it as overflow
-/// and clamp to the previous direction's extreme. This is a no-op on devices
-/// without overflow since normal stick movement never exceeds this threshold.
-fn correct_axis_overflow(raw: i16, prev: &mut Option<f64>) -> i16 {
+/// Correct stick axis overflow for OXP devices.
+///
+/// Some OXP devices (e.g. Apex) have analog sticks whose physical range
+/// exceeds signed 16-bit, causing the raw value to wrap around at full
+/// deflection (e.g. a large positive value wraps to -32768).
+///
+/// Two layers of detection are applied:
+///   1. Boundary check: raw values at exact i16 boundaries (32767 / -32768)
+///      are likely overflow artifacts rather than real positions, since normal
+///      sticks rarely land on these exact values.
+///   2. Delta check: if the normalized value jumps by more than 1.5 between
+///      frames (physically impossible for real stick movement), clamp to the
+///      previous direction's extreme.
+///
+/// Both layers are no-ops on devices without overflow.
+fn correct_axis_overflow(raw: i16, prev: &mut Option<f64>, axis_name: &str) -> i16 {
+    // Layer 1: boundary value detection.
+    // When overflow happens, the wrapped value lands on exact i16 boundaries.
+    // Flip the sign to recover the intended direction.
+    let raw = if raw == i16::MAX {
+        log::info!(
+            "OXP stick overflow: {axis_name} hit i16::MAX (32767), correcting to -32767"
+        );
+        -32767i16
+    } else if raw == i16::MIN {
+        log::info!(
+            "OXP stick overflow: {axis_name} hit i16::MIN (-32768), correcting to 32767"
+        );
+        32767i16
+    } else {
+        raw
+    };
+
+    // Layer 2: frame-to-frame delta detection.
     let normalized = raw as f64 / 32768.0;
     if let Some(prev_val) = *prev {
         let delta = (normalized - prev_val).abs();
         if delta > AXIS_OVERFLOW_THRESHOLD {
             let corrected = if prev_val > 0.0 { 1.0 } else { -1.0 };
+            log::info!(
+                "OXP stick overflow: {axis_name} delta {delta:.3} exceeds threshold, \
+                 raw={raw}, prev={prev_val:.3}, correcting to {corrected:.1}"
+            );
             *prev = Some(corrected);
             return if corrected > 0.0 { 32767 } else { -32767 };
         }
@@ -351,10 +381,14 @@ impl Driver {
                 let rx_raw = i16::from_le_bytes([buf[21], buf[22]]);
                 let ry_raw = i16::from_le_bytes([buf[23], buf[24]]);
 
-                let lx = correct_axis_overflow(lx_raw, &mut self.prev_axes[0]);
-                let ly = correct_axis_overflow(ly_raw, &mut self.prev_axes[1]);
-                let rx = correct_axis_overflow(rx_raw, &mut self.prev_axes[2]);
-                let ry = correct_axis_overflow(ry_raw, &mut self.prev_axes[3]);
+                log::trace!(
+                    "OXP stick raw: LX={lx_raw} LY={ly_raw} RX={rx_raw} RY={ry_raw}"
+                );
+
+                let lx = correct_axis_overflow(lx_raw, &mut self.prev_axes[0], "LX");
+                let ly = correct_axis_overflow(ly_raw, &mut self.prev_axes[1], "LY");
+                let rx = correct_axis_overflow(rx_raw, &mut self.prev_axes[2], "RX");
+                let ry = correct_axis_overflow(ry_raw, &mut self.prev_axes[3], "RY");
 
                 events.push(Event::Axis(AxisEvent::LStick(AxisInput { x: lx, y: ly })));
                 events.push(Event::Axis(AxisEvent::RStick(AxisInput { x: rx, y: ry })));
