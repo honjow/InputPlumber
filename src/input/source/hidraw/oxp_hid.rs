@@ -153,6 +153,14 @@ impl SourceOutputDevice for OxpHid {
                 let right = (report.right_speed.to_primitive() / 256) as u8;
                 self.set_rumble(left, right)?;
             }
+            OutputEvent::Rumble {
+                weak_magnitude,
+                strong_magnitude,
+            } => {
+                let left = (strong_magnitude / 256) as u8;
+                let right = (weak_magnitude / 256) as u8;
+                self.set_rumble(left, right)?;
+            }
             OutputEvent::Uinput(_) | OutputEvent::SteamDeckHaptics(_) => (),
         }
         Ok(())
