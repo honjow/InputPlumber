@@ -48,7 +48,7 @@ source_devices:
     config:
       oxp_hid:
         intercept: true
-        vendor_rumble: false
+        vendor_rumble: true
 
   - group: imu
     iio:
