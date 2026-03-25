@@ -42,6 +42,12 @@ impl OxpHid {
         vendor_rumble: bool,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let driver = Driver::new(device_info.devnode(), intercept)?;
+        if intercept && vendor_rumble {
+            log::warn!(
+                "OXP HID: vendor_rumble is enabled but will be ignored in intercept mode \
+                 (firmware limitation: 0xB3 commands cause intercept mode to exit)"
+            );
+        }
         Ok(Self {
             driver,
             intercept,
@@ -132,8 +138,13 @@ impl SourceOutputDevice for OxpHid {
     /// Write the given output event to the source device. Output events are
     /// events that flow from an application (like a game) to the physical
     /// input device, such as force feedback events.
+    ///
+    /// NOTE: Vendor rumble (0xB3) is disabled in intercept mode because the
+    /// OXP firmware treats any 0xB3 command as a signal to exit intercept
+    /// mode, causing input to stop working. This is a hardware limitation
+    /// with no known software workaround.
     fn write_event(&mut self, event: OutputEvent) -> Result<(), OutputError> {
-        if !self.vendor_rumble {
+        if !self.vendor_rumble || self.intercept {
             return Ok(());
         }
         match event {

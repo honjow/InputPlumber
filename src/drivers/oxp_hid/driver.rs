@@ -116,55 +116,39 @@ fn gen_vibration_cmd(strength: u8) -> [u8; PACKET_SIZE] {
     gen_cmd(0xB3, &data)
 }
 
-const AXIS_OVERFLOW_THRESHOLD: f64 = 1.5;
-
 /// Correct stick axis overflow for OXP devices.
 ///
 /// Some OXP devices (e.g. Apex) have analog sticks whose physical range
 /// exceeds signed 16-bit, causing the raw value to wrap around at full
-/// deflection (e.g. a large positive value wraps to -32768).
+/// deflection. When this happens, the raw value lands on an exact i16
+/// boundary (32767 or -32768) with the opposite sign of the previous frame.
 ///
-/// Two layers of detection are applied:
-///   1. Boundary check: raw values at exact i16 boundaries (32767 / -32768)
-///      are likely overflow artifacts rather than real positions, since normal
-///      sticks rarely land on these exact values.
-///   2. Delta check: if the normalized value jumps by more than 1.5 between
-///      frames (physically impossible for real stick movement), clamp to the
-///      previous direction's extreme.
+/// Detection requires both conditions to be true simultaneously:
+///   1. The raw value is at an exact i16 boundary (i16::MAX or i16::MIN)
+///   2. The sign is opposite to the previous frame's value
 ///
-/// Both layers are no-ops on devices without overflow.
+/// This is safe for devices without overflow (e.g. X1 Mini) because normal
+/// stick movement reaching the boundary will have the same sign as the
+/// previous frame.
 fn correct_axis_overflow(raw: i16, prev: &mut Option<f64>, axis_name: &str) -> i16 {
-    // Layer 1: boundary value detection.
-    // When overflow happens, the wrapped value lands on exact i16 boundaries.
-    // Flip the sign to recover the intended direction.
-    let raw = if raw == i16::MAX {
-        log::info!(
-            "OXP stick overflow: {axis_name} hit i16::MAX (32767), correcting to -32767"
-        );
-        -32767i16
-    } else if raw == i16::MIN {
-        log::info!(
-            "OXP stick overflow: {axis_name} hit i16::MIN (-32768), correcting to 32767"
-        );
-        32767i16
-    } else {
-        raw
-    };
-
-    // Layer 2: frame-to-frame delta detection.
     let normalized = raw as f64 / 32768.0;
+
     if let Some(prev_val) = *prev {
-        let delta = (normalized - prev_val).abs();
-        if delta > AXIS_OVERFLOW_THRESHOLD {
-            let corrected = if prev_val > 0.0 { 1.0 } else { -1.0 };
+        let at_boundary = raw == i16::MIN || raw == i16::MAX;
+        let sign_flipped = (normalized > 0.0 && prev_val < 0.0)
+            || (normalized < 0.0 && prev_val > 0.0);
+
+        if at_boundary && sign_flipped {
+            let corrected = if prev_val > 0.0 { 32767i16 } else { -32767i16 };
             log::info!(
-                "OXP stick overflow: {axis_name} delta {delta:.3} exceeds threshold, \
-                 raw={raw}, prev={prev_val:.3}, correcting to {corrected:.1}"
+                "OXP stick overflow: {axis_name} raw={raw}, prev={prev_val:.3}, \
+                 correcting to {corrected}"
             );
-            *prev = Some(corrected);
-            return if corrected > 0.0 { 32767 } else { -32767 };
+            *prev = Some(corrected as f64 / 32768.0);
+            return corrected;
         }
     }
+
     *prev = Some(normalized);
     raw.max(-32767)
 }
