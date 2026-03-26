@@ -66,7 +66,7 @@ const fn gen_cmd(cid: u8, data: &[u8]) -> [u8; PACKET_SIZE] {
 
 // B3 vibration intensity: set to max (5) so Xbox gamepad rumble works.
 // MCU does not persist this across reboots, so it must be sent every init.
-// Single page-2 write is sufficient (verified on X1 Mini, matches HHD approach).
+// Payload: 15-byte header + 35 zero padding + 9-byte tail = 59 bytes.
 const B3_VIBRATION: [u8; PACKET_SIZE] = gen_cmd(
     0xB3,
     &[
@@ -74,7 +74,7 @@ const B3_VIBRATION: [u8; PACKET_SIZE] = gen_cmd(
         0xE3, 0x39, 0xE3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x39, 0xE3, 0x39, 0xE3, 0xE3, 0x02, 0x04, 0x39, 0x39,
+        0x00, 0x00, 0x39, 0xE3, 0x39, 0xE3, 0xE3, 0x02, 0x04, 0x39, 0x39,
     ],
 );
 
@@ -106,24 +106,29 @@ impl Driver {
         })
     }
 
-    /// Send initialization commands: B4 button mapping + B3 vibration + B2 report mode.
+    /// Send initialization commands: B4 button mapping → B2 report mode → B3 vibration.
+    /// B3 must be sent AFTER the B2 cycle because B2 ENABLE resets vibration intensity.
     fn initialize(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         log::debug!("Sending OXP HID initialization commands");
+        let mut drain_buf = [0u8; PACKET_SIZE];
 
         // Configure button mappings (M1/M2 → keyboard mode, disables Xbox LT/RT mirror)
         self.device.write(&INIT_CMD_1)?;
+        std::thread::sleep(std::time::Duration::from_millis(50));
         self.device.write(&INIT_CMD_2)?;
+        std::thread::sleep(std::time::Duration::from_millis(50));
 
-        // Set vibration intensity to max so native Xbox gamepad rumble works
-        self.device.write(&B3_VIBRATION)?;
+        // Drain B4 ACK responses
+        for _ in 0..10 {
+            if self.device.read_timeout(&mut drain_buf, 50)? == 0 {
+                break;
+            }
+        }
 
         // Activate report mode via B2 ENABLE→DISABLE cycle.
-        // This is required on Apex and harmless on X1 Mini.
+        // Required on Apex; harmless on X1 Mini.
         self.device.write(&B2_ENABLE)?;
         std::thread::sleep(std::time::Duration::from_millis(200));
-
-        // Drain any ACK responses from the enable command
-        let mut drain_buf = [0u8; PACKET_SIZE];
         for _ in 0..10 {
             if self.device.read_timeout(&mut drain_buf, 50)? == 0 {
                 break;
@@ -132,8 +137,15 @@ impl Driver {
 
         self.device.write(&B2_DISABLE)?;
         std::thread::sleep(std::time::Duration::from_millis(100));
+        for _ in 0..10 {
+            if self.device.read_timeout(&mut drain_buf, 50)? == 0 {
+                break;
+            }
+        }
 
-        // Drain disable ACK
+        // Set vibration intensity to max AFTER B2 cycle (B2 ENABLE resets it)
+        self.device.write(&B3_VIBRATION)?;
+        std::thread::sleep(std::time::Duration::from_millis(50));
         for _ in 0..10 {
             if self.device.read_timeout(&mut drain_buf, 50)? == 0 {
                 break;
