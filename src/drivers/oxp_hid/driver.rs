@@ -64,6 +64,20 @@ const fn gen_cmd(cid: u8, data: &[u8]) -> [u8; PACKET_SIZE] {
     buf
 }
 
+// B3 vibration intensity: set to max (5) so Xbox gamepad rumble works.
+// MCU does not persist this across reboots, so it must be sent every init.
+// Single page-2 write is sufficient (verified on X1 Mini, matches HHD approach).
+const B3_VIBRATION: [u8; PACKET_SIZE] = gen_cmd(
+    0xB3,
+    &[
+        0x02, 0x38, 0x02, 0xE3, 0x39, 0xE3, 0x39, 0xE3, 0x39, 0x01, 0x05, 0x05,
+        0xE3, 0x39, 0xE3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x39, 0xE3, 0x39, 0xE3, 0xE3, 0x02, 0x04, 0x39, 0x39,
+    ],
+);
+
 // B2 report mode activation: ENABLE then DISABLE cycle.
 // Required on Apex; harmless on X1 Mini (tested: both phases produce events).
 const B2_ENABLE: [u8; PACKET_SIZE] = gen_cmd(CMD_BUTTON, &[0x03, 0x01, 0x02]);
@@ -92,13 +106,16 @@ impl Driver {
         })
     }
 
-    /// Send initialization commands: B4 button mapping + B2 report mode activation.
+    /// Send initialization commands: B4 button mapping + B3 vibration + B2 report mode.
     fn initialize(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         log::debug!("Sending OXP HID initialization commands");
 
         // Configure button mappings (M1/M2 → keyboard mode, disables Xbox LT/RT mirror)
         self.device.write(&INIT_CMD_1)?;
         self.device.write(&INIT_CMD_2)?;
+
+        // Set vibration intensity to max so native Xbox gamepad rumble works
+        self.device.write(&B3_VIBRATION)?;
 
         // Activate report mode via B2 ENABLE→DISABLE cycle.
         // This is required on Apex and harmless on X1 Mini.
