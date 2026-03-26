@@ -29,6 +29,9 @@ impl SourceInputDevice for OxpHid {
     fn poll(&mut self) -> Result<Vec<NativeEvent>, InputError> {
         let events = self.driver.poll()?;
         let native_events = translate_events(events);
+        for ev in &native_events {
+            log::info!("OXP HID → NativeEvent: {:?} = {:?}", ev.as_capability(), ev.get_value());
+        }
         Ok(native_events)
     }
 
