@@ -520,13 +520,7 @@ impl HidRawDevice {
                 Ok(Self::GpdWinMiniMacroKeyboard(source_device))
             }
             DriverType::OxpHid => {
-                let oxp_conf = conf
-                    .as_ref()
-                    .and_then(|c| c.config.as_ref())
-                    .and_then(|c| c.oxp_hid.as_ref());
-                let intercept = oxp_conf.and_then(|c| c.intercept).unwrap_or(false);
-                let vendor_rumble = oxp_conf.and_then(|c| c.vendor_rumble).unwrap_or(true);
-                let device = OxpHid::new(device_info.clone(), intercept, vendor_rumble)?;
+                let device = OxpHid::new(device_info.clone())?;
                 let source_device =
                     SourceDriver::new(composite_device, device, device_info.into(), conf);
                 Ok(Self::OxpHid(source_device))

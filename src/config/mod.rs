@@ -284,22 +284,6 @@ pub struct SourceDeviceConfig {
     pub imu: Option<ImuConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub led: Option<LedConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub oxp_hid: Option<OxpHidConfig>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub struct OxpHidConfig {
-    /// If true, enable full intercept mode: the Xbox gamepad is silenced and
-    /// all input (buttons, sticks, triggers) is routed through vendor HID.
-    /// Required for Apex back paddles; optional on X1 Mini for testing.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub intercept: Option<bool>,
-    /// If true, handle force feedback via vendor HID 0xB3 command instead of
-    /// relying on the xpad kernel driver. Defaults to true.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub vendor_rumble: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
