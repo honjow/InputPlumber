@@ -164,27 +164,32 @@ turbo (rapid fire).
 
 ### Mode 0x02 — Keyboard
 
-Maps a physical button to up to 4 simultaneous keyboard keys (HID usage codes).
+Maps a physical button to up to 4 simultaneous keyboard keys.
+
+> **Key encoding note:** The OXP firmware uses a **proprietary key encoding**
+> that differs from standard USB HID Usage Tables. For function keys, the
+> formula is `F(n) = 0x59 + n` (e.g., F1=0x5A, F13=0x66, F14=0x67). This is
+> confirmed by srsholmes's Apex firmware remap implementation. The OXP internal
+> documentation does not explicitly document this encoding.
 
 **Example:**
 
 | Description | byte1 | byte2 | byte3 | byte4 | byte5 | byte6 |
 |-------------|-------|-------|-------|-------|-------|-------|
 | X → Keyboard 'A' (0x04) | 0x03 | 0x02 | 0x04 | 0x00 | 0x00 | 0x00 |
-| M1 → F13 (0x68) | 0x22 | 0x02 | 0x68 | 0x00 | 0x00 | 0x00 |
-| M2 → F14 (0x69) | 0x23 | 0x02 | 0x69 | 0x00 | 0x00 | 0x00 |
+| M1 → F14 (OXP: 0x67) | 0x22 | 0x02 | 0x01 | 0x67 | 0x00 | 0x00 |
+| M2 → F13 (OXP: 0x66) | 0x23 | 0x02 | 0x01 | 0x66 | 0x00 | 0x00 |
 
-Keyboard key codes follow USB HID Usage Tables (page 0x07). Common codes:
+OXP proprietary key codes for function keys (`F(n) = 0x59 + n`):
 
-| Code | Key | Code | Key | Code | Key |
-|------|-----|------|-----|------|-----|
-| 0x04 | A | 0x1E | 1 | 0x3A | F1 |
-| 0x05 | B | 0x1F | 2 | 0x3B | F2 |
-| 0x06 | C | 0x20 | 3 | 0x44 | F11 |
-| 0x07 | D | 0x21 | 4 | 0x45 | F12 |
-| 0x08 | E | 0x22 | 5 | 0x68 | F13 |
-| 0x09 | F | 0x23 | 6 | 0x69 | F14 |
-| 0x2C | Space | 0x28 | Enter | 0x29 | Escape |
+| OXP Code | Key | OXP Code | Key | OXP Code | Key |
+|----------|-----|----------|-----|----------|-----|
+| 0x5A | F1 | 0x60 | F7 | 0x66 | F13 |
+| 0x5B | F2 | 0x61 | F8 | 0x67 | F14 |
+| 0x5C | F3 | 0x62 | F9 | 0x68 | F15 |
+| 0x5D | F4 | 0x63 | F10 | 0x69 | F16 |
+| 0x5E | F5 | 0x64 | F11 | | |
+| 0x5F | F6 | 0x65 | F12 | | |
 
 ### Mode 0x03 — Macro
 
@@ -260,8 +265,11 @@ B4 3F 01 02 38 02 02 01           ← byte5-7: 0x38 0x02 0x02(page 2)
 ```
 
 Note: Factory default maps M1 → LT and M2 → RT in gamepad mode (`0x01`). InputPlumber's
-`INIT_CMD_2` changes M1/M2 to keyboard mode (`0x02`) with key code `0x00` (no key), which
-effectively disables the LT/RT mirroring on the Xbox 360 pad.
+`INIT_CMD_2` changes M1/M2 to keyboard mode (`0x02`) with keycodes F14/F13
+(`0x22 0x02 0x01 0x67 0x00 0x00` for M1→F14, `0x23 0x02 0x01 0x66 0x00 0x00` for M2→F13),
+which disables the LT/RT mirroring on the Xbox gamepad while assigning unique keycodes.
+The OXP key encoding for function keys uses the formula `F(n) = 0x59 + n`
+(F13=0x66, F14=0x67), which differs from USB HID standard codes (F13=0x68, F14=0x69).
 
 ## GD32 vs CH32 Differences
 
@@ -286,7 +294,7 @@ Our `INIT_CMD_1` and `INIT_CMD_2` in `driver.rs` use the correct header format (
 from the HHD project):
 
 ```
-Working header:     B4 3F 01 02 38 02 [page] 01
+Working header:     B4 3F 01 02 38 20 [page] 01
 OXP doc header:     B4 3F 01 02 00 00 00     01  ← DOES NOT WORK on X1 Mini
 ```
 
@@ -294,8 +302,13 @@ The OXP internal documentation (`GD32--CH32 Mapping analysis26.1.15.xlsx`) marks
 5-7 as "reserved `0x00`", but this is **incorrect** for the X1 Mini (CH32 MCU).
 Individual byte testing on X1 Mini confirmed:
 
-- `0x38 0x02 [page]` — works (the only working format)
+- `0x38 0x20 [page]` — works (current InputPlumber implementation)
+- `0x38 0x02 [page]` — also works (used by HHD's hid_v1.py)
 - `0x00 0x00 0x00` — silently ignored, no mapping update occurs
 
+Byte 5 (`0x38`) is required and likely represents the data payload length (56 bytes).
+Byte 6 accepts both `0x02` and `0x20`; the firmware readback on X1 Mini returns `0x20`,
+which is what InputPlumber uses. The HHD project uses `0x02` and it also works.
+
 The official document may describe the GD32 (UART) variant's protocol, or it may simply
-be outdated. The CH32 (HID) firmware requires the `0x38 0x02 [page]` prefix.
+be outdated. The CH32 (HID) firmware requires at minimum the `0x38` prefix on byte 5.
