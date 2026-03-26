@@ -48,10 +48,6 @@ source_devices:
       vendor_id: 0x1a86
       product_id: 0xfe00
       interface_num: 2
-    config:
-      oxp_hid:
-        intercept: false
-        vendor_rumble: true
   - group: gamepad
     udev:
       id_vendor: "1a86"
