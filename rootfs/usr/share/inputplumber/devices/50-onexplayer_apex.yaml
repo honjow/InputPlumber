@@ -45,10 +45,6 @@ source_devices:
       vendor_id: 0x1a86
       product_id: 0xfe00
       interface_num: 2
-    config:
-      oxp_hid:
-        intercept: true
-        vendor_rumble: true
 
   - group: imu
     iio:
