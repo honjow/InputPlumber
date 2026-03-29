@@ -206,13 +206,19 @@ impl TouchscreenEventDevice {
         log::debug!("Opening device at: {}", path);
         let mut device = Device::open(path.clone())?;
 
-        let grab = config
-            .as_ref()
-            .and_then(|c| c.grab)
-            .unwrap_or(false);
-        if grab {
-            device.grab()?;
-        }
+        let grab = if config.as_ref().and_then(|c| c.grab).unwrap_or(false) {
+            match device.grab() {
+                Ok(_) => true,
+                Err(e) => {
+                    log::warn!(
+                        "Failed to grab touchscreen, falling back to pass-through mode: {e}"
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
 
         // Set the device to do non-blocking reads
         // TODO: use epoll to wake up when data is available
@@ -481,12 +487,29 @@ impl TouchscreenEventDevice {
             return vec![];
         }
 
-        let start_x = self.gesture_state.start_x;
-        let Some(start_y) = self.gesture_state.start_y else {
+        let Some(raw_start_y) = self.gesture_state.start_y else {
             return vec![];
         };
-        let last_x = self.gesture_state.last_x;
-        let last_y = self.gesture_state.last_y;
+
+        // Rotate gesture coordinates to match display orientation before
+        // evaluating edge zones and travel direction.
+        let start = TouchState {
+            is_touching: true,
+            x: self.gesture_state.start_x,
+            y: raw_start_y,
+            pressure: 1.0,
+        }
+        .rotate(self.orientation);
+        let last = TouchState {
+            is_touching: true,
+            x: self.gesture_state.last_x,
+            y: self.gesture_state.last_y,
+            pressure: 1.0,
+        }
+        .rotate(self.orientation);
+
+        let (start_x, start_y) = (start.x, start.y);
+        let (last_x, last_y) = (last.x, last.y);
 
         let gesture_type = if start_x < GESTURE_START && (last_x - start_x) > GESTURE_MIN_TRAVEL {
             // Swipe inward from the left edge

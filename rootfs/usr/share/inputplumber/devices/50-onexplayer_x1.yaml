@@ -63,6 +63,7 @@ source_devices:
     config:
       touchscreen:
         grab: true
+        orientation: "left"
 
 # The target input device(s) that the virtual device profile can use
 target_devices:
