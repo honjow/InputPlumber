@@ -303,6 +303,10 @@ pub struct TouchscreenConfig {
     /// instead of the size advertised by the device itself.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub override_source_size: Option<bool>,
+    /// If true, the device will not be grabbed exclusively. Touch events will continue to
+    /// pass through to the compositor, so no target touchscreen device is needed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub passthrough: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::os::fd::AsFd;
+use std::time::{Duration, Instant};
 use std::{collections::HashMap, error::Error};
 
 use evdev::{
@@ -11,7 +12,7 @@ use nix::fcntl::{FcntlArg, OFlag};
 
 use crate::config::capability_map::CapabilityMapConfigV2;
 use crate::config::TouchscreenConfig;
-use crate::input::capability::Touch;
+use crate::input::capability::{GestureArea, GestureType, Touch};
 use crate::input::event::evdev::translator::EventTranslator;
 use crate::input::event::value::InputValue;
 use crate::{
@@ -22,6 +23,15 @@ use crate::{
     },
     udev::device::UdevDevice,
 };
+
+/// Edge zone for gesture detection: finger must start within this fraction of the edge.
+const GESTURE_START: f64 = 0.05;
+/// Minimum travel distance (as a fraction of screen) required to confirm a gesture.
+const GESTURE_MIN_TRAVEL: f64 = 0.12;
+/// Maximum duration from first touch to gesture recognition
+const GESTURE_TIME: Duration = Duration::from_millis(400);
+/// Y coordinate ratio separating the top and bottom gesture areas for left/right swipes
+const GESTURE_TOP_RATIO: f64 = 0.33;
 
 /// Orientation of the touchscreen used to translate touch
 #[derive(Debug, Clone, Copy, Default)]
@@ -42,6 +52,74 @@ impl From<&str> for Orientation {
             "upsidedown" => Self::UpsideDown,
             _ => Self::Normal,
         }
+    }
+}
+
+/// Lifecycle of a single-finger edge-swipe gesture within one touch sequence
+#[derive(Debug, Default)]
+enum GesturePhase {
+    /// No touch in progress.
+    #[default]
+    Idle,
+    /// Touch started; watching for a gesture.
+    /// `suppressing` controls whether slot-0 touch events are forwarded to
+    /// the virtual touchscreen target.
+    Tracking { suppressing: bool },
+    /// A gesture was recognized; suppress remaining touch events until lift.
+    Triggered,
+    /// A second finger arrived; gesture detection disabled for this touch.
+    Invalidated,
+}
+
+/// Tracks a single-finger swipe gesture in progress
+#[derive(Debug, Default)]
+struct GestureState {
+    start_x: f64,
+    /// None until the first Y-axis event arrives after touch-down
+    start_y: Option<f64>,
+    last_x: f64,
+    last_y: f64,
+    start_time: Option<Instant>,
+    phase: GesturePhase,
+}
+
+impl GestureState {
+    /// Returns true if no touch is currently being tracked
+    fn is_idle(&self) -> bool {
+        matches!(self.phase, GesturePhase::Idle)
+    }
+
+    /// Returns true if slot-0 touch events should not be forwarded
+    fn is_suppressing(&self) -> bool {
+        matches!(
+            self.phase,
+            GesturePhase::Tracking { suppressing: true } | GesturePhase::Triggered
+        )
+    }
+
+    /// Multi-finger touch detected; disable gesture for this touch sequence
+    fn invalidate(&mut self) {
+        self.phase = GesturePhase::Invalidated;
+    }
+
+    /// Gesture recognized; suppress remaining touch and block re-initialization
+    fn mark_triggered(&mut self) {
+        self.phase = GesturePhase::Triggered;
+    }
+
+    /// Finger released; reset all state
+    fn reset(&mut self) {
+        *self = GestureState::default();
+    }
+
+    /// Returns true if a gesture is still being evaluated (within time limit)
+    fn is_active(&self) -> bool {
+        let GesturePhase::Tracking { .. } = self.phase else {
+            return false;
+        };
+        self.start_time
+            .map(|t| t.elapsed() <= GESTURE_TIME)
+            .unwrap_or(false)
     }
 }
 
@@ -108,6 +186,7 @@ pub struct TouchscreenEventDevice {
     touch_state: [TouchState; 10], // NOTE: Max of 10 touch inputs
     dirty_states: HashSet<usize>,
     last_touch_idx: usize,
+    gesture_state: GestureState,
 }
 
 impl TouchscreenEventDevice {
@@ -120,7 +199,14 @@ impl TouchscreenEventDevice {
         let path = device_info.devnode();
         log::debug!("Opening device at: {}", path);
         let mut device = Device::open(path.clone())?;
-        device.grab()?;
+
+        let passthrough = config
+            .as_ref()
+            .and_then(|c| c.passthrough)
+            .unwrap_or(false);
+        if !passthrough {
+            device.grab()?;
+        }
 
         // Set the device to do non-blocking reads
         // TODO: use epoll to wake up when data is available
@@ -193,6 +279,7 @@ impl TouchscreenEventDevice {
             touch_state: Default::default(),
             dirty_states: HashSet::with_capacity(10),
             last_touch_idx: 0,
+            gesture_state: GestureState::default(),
         })
     }
 
@@ -215,11 +302,19 @@ impl TouchscreenEventDevice {
                         continue;
                     };
 
+                    // Suppress slot-0 touch events while a potential gesture is being tracked
+                    if idx == 0 && self.gesture_state.is_suppressing() {
+                        continue;
+                    }
+
                     // Rotate values based on config
                     let rotated_touch = touch.rotate(self.orientation);
                     let event = rotated_touch.to_native_event(idx as u8);
                     events.push(event);
                 }
+
+                // Detect edge-swipe gestures from the primary touch slot
+                events.extend(self.detect_gesture());
 
                 return events;
             }
@@ -238,17 +333,28 @@ impl TouchscreenEventDevice {
             // be the first touch, "1", the second, etc. Upon receiving this event,
             // any following ABS_X/Y events are associated with this touch index.
             EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_SLOT, value) => {
-                // Select the current slot to update
                 let slot = value as usize;
                 self.last_touch_idx = slot;
                 self.dirty_states.insert(slot);
+                // A second finger arriving invalidates any in-progress gesture
+                if slot > 0 {
+                    self.gesture_state.invalidate();
+                }
             }
             // Whenever a touch is lifted, an ABS_MT_TRACKING_ID event with a value of
             // -1 event will occur.
             EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_TRACKING_ID, -1) => {
                 if let Some(touch) = self.touch_state.get_mut(self.last_touch_idx) {
                     touch.is_touching = false;
-                    self.dirty_states.insert(self.last_touch_idx);
+                    // Only emit release if this touch was not suppressed (i.e. the
+                    // system never saw a press, so sending a release would confuse it)
+                    if !(self.last_touch_idx == 0 && self.gesture_state.is_suppressing()) {
+                        self.dirty_states.insert(self.last_touch_idx);
+                    }
+                }
+                // Primary finger lifted: reset gesture state
+                if self.last_touch_idx == 0 {
+                    self.gesture_state.reset();
                 }
             }
             // Emitted whenever touch motion is detected for the X axis
@@ -265,6 +371,19 @@ impl TouchscreenEventDevice {
                     touch.x = normal_value;
                     self.dirty_states.insert(self.last_touch_idx);
                 }
+
+                // Track gesture only for the primary slot
+                if self.last_touch_idx == 0 {
+                    if self.gesture_state.is_idle() {
+                        let suppress = normal_value < GESTURE_START
+                            || normal_value > 1.0 - GESTURE_START;
+                        self.gesture_state.start_x = normal_value;
+                        self.gesture_state.start_time = Some(Instant::now());
+                        self.gesture_state.phase =
+                            GesturePhase::Tracking { suppressing: suppress };
+                    }
+                    self.gesture_state.last_x = normal_value;
+                }
             }
             // Emitted whenever touch motion is detected for the Y axis
             EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_POSITION_Y, value) => {
@@ -279,6 +398,16 @@ impl TouchscreenEventDevice {
                     touch.is_touching = true;
                     touch.y = normal_value;
                     self.dirty_states.insert(self.last_touch_idx);
+                }
+
+                // Track gesture only for the primary slot
+                if self.last_touch_idx == 0 {
+                    if self.gesture_state.start_y.is_none()
+                        && matches!(self.gesture_state.phase, GesturePhase::Tracking { .. })
+                    {
+                        self.gesture_state.start_y = Some(normal_value);
+                    }
+                    self.gesture_state.last_y = normal_value;
                 }
             }
             // Some touchscreens support touch pressure and emit this event.
@@ -300,6 +429,62 @@ impl TouchscreenEventDevice {
         }
 
         vec![]
+    }
+
+    /// Attempt to recognize a completed edge-swipe gesture from the current
+    /// gesture state. Returns a gesture event if one is recognized, and resets
+    /// the gesture state. Returns `None` if no gesture is detected yet.
+    fn detect_gesture(&mut self) -> Vec<NativeEvent> {
+        if !self.gesture_state.is_active() {
+            return vec![];
+        }
+
+        let start_x = self.gesture_state.start_x;
+        let Some(start_y) = self.gesture_state.start_y else {
+            return vec![];
+        };
+        let last_x = self.gesture_state.last_x;
+        let last_y = self.gesture_state.last_y;
+
+        // start_x == 0.0 is a valid edge coordinate; no extra guard needed here
+
+        let gesture_type = if start_x < GESTURE_START && (last_x - start_x) > GESTURE_MIN_TRAVEL {
+            // Swipe inward from the left edge
+            let area = if start_y < GESTURE_TOP_RATIO {
+                GestureArea::Top
+            } else {
+                GestureArea::Bottom
+            };
+            Some(GestureType::SwipeRight(area))
+        } else if start_x > 1.0 - GESTURE_START && (start_x - last_x) > GESTURE_MIN_TRAVEL {
+            // Swipe inward from the right edge
+            let area = if start_y < GESTURE_TOP_RATIO {
+                GestureArea::Top
+            } else {
+                GestureArea::Bottom
+            };
+            Some(GestureType::SwipeLeft(area))
+        } else if start_y > 1.0 - GESTURE_START && (start_y - last_y) > GESTURE_MIN_TRAVEL {
+            // Swipe inward from the bottom edge
+            Some(GestureType::SwipeUp)
+        } else if start_y < GESTURE_START && (last_y - start_y) > GESTURE_MIN_TRAVEL {
+            // Swipe inward from the top edge
+            Some(GestureType::SwipeDown)
+        } else {
+            None
+        };
+
+        if let Some(gesture) = gesture_type {
+            log::debug!("Gesture detected: {:?}", gesture);
+            self.gesture_state.mark_triggered();
+            let cap = Capability::Touchscreen(Touch::Gesture(gesture));
+            vec![
+                NativeEvent::new(cap.clone(), InputValue::Bool(true)),
+                NativeEvent::new(cap, InputValue::Bool(false)),
+            ]
+        } else {
+            vec![]
+        }
     }
 }
 
@@ -377,7 +562,15 @@ impl SourceInputDevice for TouchscreenEventDevice {
 
     /// Returns the possible input events this device is capable of emitting
     fn get_capabilities(&self) -> Result<Vec<Capability>, InputError> {
-        Ok(vec![Capability::Touchscreen(Touch::Motion)])
+        Ok(vec![
+            Capability::Touchscreen(Touch::Motion),
+            Capability::Touchscreen(Touch::Gesture(GestureType::SwipeRight(GestureArea::Top))),
+            Capability::Touchscreen(Touch::Gesture(GestureType::SwipeRight(GestureArea::Bottom))),
+            Capability::Touchscreen(Touch::Gesture(GestureType::SwipeLeft(GestureArea::Top))),
+            Capability::Touchscreen(Touch::Gesture(GestureType::SwipeLeft(GestureArea::Bottom))),
+            Capability::Touchscreen(Touch::Gesture(GestureType::SwipeUp)),
+            Capability::Touchscreen(Touch::Gesture(GestureType::SwipeDown)),
+        ])
     }
 }
 
