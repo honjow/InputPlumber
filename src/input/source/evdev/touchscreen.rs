@@ -53,7 +53,10 @@ impl From<&str> for Orientation {
             "left" => Self::RotateLeft,
             "right" => Self::RotateRight,
             "upsidedown" => Self::UpsideDown,
-            _ => Self::Normal,
+            other => {
+                log::warn!("Unknown touchscreen orientation '{other}', defaulting to normal");
+                Self::Normal
+            }
         }
     }
 }
@@ -665,5 +668,8 @@ impl Debug for TouchscreenEventDevice {
 // Returns a value between 0.0 and 1.0 based on the given value with its
 // maximum.
 fn normalize_unsigned_value(raw_value: i32, max: i32) -> f64 {
+    if max <= 0 {
+        return 0.0;
+    }
     raw_value as f64 / max as f64
 }

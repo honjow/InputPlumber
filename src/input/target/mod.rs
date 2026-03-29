@@ -763,6 +763,17 @@ impl<T: TargetInputDevice + TargetOutputDevice + Send + 'static> TargetDriver<T>
             }
             TargetCommand::ClearState => {
                 implementation.clear_state();
+                // Discard any pending delayed releases to avoid ghost key events
+                // after the composite device has cleared intercept state.
+                pressed_events.clear();
+                scheduled_events.retain(|e| {
+                    !matches!(
+                        e.event().as_capability(),
+                        Capability::Gamepad(Gamepad::Button(_))
+                            | Capability::Keyboard(_)
+                            | Capability::Mouse(Mouse::Button(_))
+                    )
+                });
             }
             TargetCommand::Stop => {
                 implementation.stop()?;
