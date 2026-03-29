@@ -54,7 +54,7 @@ pub struct CompositeDeviceTargets {
     /// Map of DBusDevice DBus paths to their respective transmitter channel.
     /// E.g. {"/org/shadowblip/InputPlumber/devices/target/dbus0": <Sender>}
     target_dbus_devices: HashMap<String, TargetDeviceClient>,
-    /// True if this composite device has a touchscreen source that is not in passthrough mode.
+    /// True if this composite device has a grabbed touchscreen source.
     /// When true, the touchscreen target will always be kept in the target list.
     has_touchscreen_source: bool,
 }
@@ -70,11 +70,11 @@ impl CompositeDeviceTargets {
     ) -> Self {
         let has_touchscreen_source = config.source_devices.iter().any(|src| {
             src.group == "touchscreen"
-                && !src
+                && src
                     .config
                     .as_ref()
                     .and_then(|c| c.touchscreen.as_ref())
-                    .and_then(|t| t.passthrough)
+                    .and_then(|t| t.grab)
                     .unwrap_or(false)
         });
         Self {
@@ -145,13 +145,12 @@ impl CompositeDeviceTargets {
     ) -> Result<(), Box<dyn Error>> {
         let dbus_path = self.path.as_str();
 
-        // If the composite device has a non-passthrough touchscreen source,
-        // always keep touchscreen in the target list regardless of what the
-        // caller requested.
+        // If the composite device has a grabbed touchscreen source, always keep
+        // touchscreen in the target list regardless of what the caller requested.
         if self.has_touchscreen_source {
             let touchscreen_id: TargetDeviceTypeId = TOUCHSCREEN_TARGET_ID.try_into().unwrap();
             if !device_types.contains(&touchscreen_id) {
-                log::debug!("[{dbus_path}] Auto-adding touchscreen target (non-passthrough touchscreen source detected)");
+                log::debug!("[{dbus_path}] Auto-adding touchscreen target (grabbed touchscreen source detected)");
                 device_types.push(touchscreen_id);
             }
         }

@@ -50,6 +50,9 @@ source_devices:
           value: "1"
       sys_name: "event*"
       subsystem: input
+    config:
+      touchscreen:
+        grab: true
   - group: imu
     iio:
       name: "{i2c-BMI0160:00,bmi260}"

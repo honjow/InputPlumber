@@ -25,7 +25,10 @@ use crate::{
 };
 
 /// Edge zone for gesture detection: finger must start within this fraction of the edge.
-const GESTURE_START: f64 = 0.05;
+const GESTURE_START: f64 = 0.03;
+/// Edge zone for pre-suppression in grab mode: narrower than GESTURE_START so that
+/// taps and scrolls near (but not at) the edge still pass through freely.
+const GESTURE_SUPPRESS_START: f64 = 0.01;
 /// Minimum travel distance (as a fraction of screen) required to confirm a gesture.
 const GESTURE_MIN_TRAVEL: f64 = 0.12;
 /// Maximum duration from first touch to gesture recognition
@@ -62,7 +65,9 @@ enum GesturePhase {
     #[default]
     Idle,
     /// Touch started; watching for a gesture.
-    Tracking,
+    /// In grab mode, `suppressing` indicates whether slot-0 events are being
+    /// held back because the touch started in an edge zone.
+    Tracking { suppressing: bool },
     /// A gesture was recognized; suppress remaining touch events until lift.
     Triggered,
     /// A second finger arrived; gesture detection disabled for this touch.
@@ -89,7 +94,10 @@ impl GestureState {
 
     /// Returns true if slot-0 touch events should not be forwarded
     fn is_suppressing(&self) -> bool {
-        matches!(self.phase, GesturePhase::Triggered)
+        matches!(
+            self.phase,
+            GesturePhase::Tracking { suppressing: true } | GesturePhase::Triggered
+        )
     }
 
     /// Multi-finger touch detected; disable gesture for this touch sequence
@@ -109,7 +117,7 @@ impl GestureState {
 
     /// Returns true if a gesture is still being evaluated (within time limit)
     fn is_active(&self) -> bool {
-        let GesturePhase::Tracking = self.phase else {
+        let GesturePhase::Tracking { .. } = self.phase else {
             return false;
         };
         self.start_time
@@ -182,6 +190,9 @@ pub struct TouchscreenEventDevice {
     dirty_states: HashSet<usize>,
     last_touch_idx: usize,
     gesture_state: GestureState,
+    /// When true, the device is grabbed exclusively and touch events in the
+    /// edge zone are suppressed until a gesture is confirmed or ruled out.
+    grab: bool,
 }
 
 impl TouchscreenEventDevice {
@@ -195,11 +206,11 @@ impl TouchscreenEventDevice {
         log::debug!("Opening device at: {}", path);
         let mut device = Device::open(path.clone())?;
 
-        let passthrough = config
+        let grab = config
             .as_ref()
-            .and_then(|c| c.passthrough)
+            .and_then(|c| c.grab)
             .unwrap_or(false);
-        if !passthrough {
+        if grab {
             device.grab()?;
         }
 
@@ -275,6 +286,7 @@ impl TouchscreenEventDevice {
             dirty_states: HashSet::with_capacity(10),
             last_touch_idx: 0,
             gesture_state: GestureState::default(),
+            grab,
         })
     }
 
@@ -341,9 +353,34 @@ impl TouchscreenEventDevice {
             EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_TRACKING_ID, -1) => {
                 if let Some(touch) = self.touch_state.get_mut(self.last_touch_idx) {
                     touch.is_touching = false;
-                    // Only emit release if this touch was not suppressed (i.e. the
-                    // system never saw a press, so sending a release would confuse it)
-                    if !(self.last_touch_idx == 0 && self.gesture_state.is_suppressing()) {
+
+                    if self.last_touch_idx == 0 && self.gesture_state.is_suppressing() {
+                        // Touch was pre-suppressed. If no gesture fired, the user
+                        // made a tap or short swipe that didn't qualify as a gesture;
+                        // replay it as a synthetic press→release so the system sees it.
+                        if !matches!(self.gesture_state.phase, GesturePhase::Triggered) {
+                            if let Some(start_y) = self.gesture_state.start_y {
+                                let press = TouchState {
+                                    is_touching: true,
+                                    x: self.gesture_state.start_x,
+                                    y: start_y,
+                                    pressure: 1.0,
+                                };
+                                let release = TouchState {
+                                    is_touching: false,
+                                    ..press.clone()
+                                };
+                                self.gesture_state.reset();
+                                return vec![
+                                    press.rotate(self.orientation).to_native_event(0),
+                                    release.rotate(self.orientation).to_native_event(0),
+                                ];
+                            }
+                        }
+                        // Gesture fired (or no Y data recorded): discard silently.
+                    } else {
+                        // Only emit release if this touch was not suppressed (i.e. the
+                        // system never saw a press, so sending a release would confuse it)
                         self.dirty_states.insert(self.last_touch_idx);
                     }
                 }
@@ -370,9 +407,14 @@ impl TouchscreenEventDevice {
                 // Track gesture only for the primary slot
                 if self.last_touch_idx == 0 {
                     if self.gesture_state.is_idle() {
+                        // In grab mode, pre-suppress touches that start in the
+                        // edge zone to avoid any leakage before gesture confirm.
+                        let suppressing = self.grab
+                            && (normal_value < GESTURE_SUPPRESS_START
+                                || normal_value > 1.0 - GESTURE_SUPPRESS_START);
                         self.gesture_state.start_x = normal_value;
                         self.gesture_state.start_time = Some(Instant::now());
-                        self.gesture_state.phase = GesturePhase::Tracking;
+                        self.gesture_state.phase = GesturePhase::Tracking { suppressing };
                     }
                     self.gesture_state.last_x = normal_value;
                 }
@@ -395,9 +437,17 @@ impl TouchscreenEventDevice {
                 // Track gesture only for the primary slot
                 if self.last_touch_idx == 0 {
                     if self.gesture_state.start_y.is_none()
-                        && matches!(self.gesture_state.phase, GesturePhase::Tracking)
+                        && matches!(self.gesture_state.phase, GesturePhase::Tracking { .. })
                     {
                         self.gesture_state.start_y = Some(normal_value);
+                        // In grab mode, also suppress touches starting at the
+                        // top or bottom edge.
+                        if self.grab
+                            && (normal_value < GESTURE_SUPPRESS_START
+                                || normal_value > 1.0 - GESTURE_SUPPRESS_START)
+                        {
+                            self.gesture_state.phase = GesturePhase::Tracking { suppressing: true };
+                        }
                     }
                     self.gesture_state.last_y = normal_value;
                 }
@@ -466,21 +516,27 @@ impl TouchscreenEventDevice {
 
         if let Some(gesture) = gesture_type {
             log::debug!("Gesture detected: {:?}", gesture);
+
+            // Capture suppression state before transitioning: if the touch was
+            // NOT pre-suppressed, the system already received press frames and
+            // needs a matching synthetic release before the gesture fires.
+            let needs_synthetic_release = self.grab && !self.gesture_state.is_suppressing();
             self.gesture_state.mark_triggered();
 
-            // The initial touch frames were already forwarded to the system
-            // (no pre-suppression). Emit a synthetic lift-off so the system
-            // sees a clean press→release before we suppress the real one.
-            let mut release_state = self.touch_state[0].clone();
-            release_state.is_touching = false;
-            let release_event = release_state.rotate(self.orientation).to_native_event(0);
-
             let cap = Capability::Touchscreen(Touch::Gesture(gesture));
-            vec![
-                release_event,
+            let mut events = vec![
                 NativeEvent::new(cap.clone(), InputValue::Bool(true)),
                 NativeEvent::new(cap, InputValue::Bool(false)),
-            ]
+            ];
+
+            if needs_synthetic_release {
+                let mut release_state = self.touch_state[0].clone();
+                release_state.is_touching = false;
+                let release_event = release_state.rotate(self.orientation).to_native_event(0);
+                events.insert(0, release_event);
+            }
+
+            events
         } else {
             vec![]
         }
