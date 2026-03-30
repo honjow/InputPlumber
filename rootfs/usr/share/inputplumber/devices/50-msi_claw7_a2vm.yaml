@@ -34,12 +34,29 @@ source_devices:
       vendor_id: "0db0"
       product_id: "1901"
       phys_path: "usb-0000:00:14.0-2/input0"
+
+  # Xinput remapping gamepad
+  # input2 exposes both a keyboard and a mouse event node, allow both to match
+  - group: gamepad
+    unique: false
+    evdev:
+      vendor_id: "0db0"
+      product_id: "1901"
+      phys_path: "usb-0000:00:14.0-2/input2"
+
   - group: gamepad
     passthrough: true
     hidraw:
       vendor_id: 0x0db0
       product_id: 0x1901
       interface_num: 2
+
+  # Interface 01 for M1/M2 button configuration (hid-msi-claw driver)
+  - group: gamepad
+    hidraw:
+      vendor_id: 0x0db0
+      product_id: 0x1901
+      interface_num: 1
 
   # IMU
 
