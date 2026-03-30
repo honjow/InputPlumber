@@ -22,13 +22,15 @@ use super::{
 /// nor the hardware's `_available` list provides a value.
 const DEFAULT_SAMPLE_RATE: f64 = 200.0;
 
-/// If a single poll() cycle takes longer than this, assume the HID Sensor Hub
-/// is recovering from suspend/resume and back off to let it finish.
+/// Fallback: if a single poll() cycle takes longer than this, assume the HID
+/// Sensor Hub is recovering from suspend/resume and back off. The primary
+/// suspend protection is the SourceDriver pause (via logind PrepareForSleep);
+/// this threshold acts as a safety net if the signal is missed or delayed.
 const POLL_SLOW_THRESHOLD: Duration = Duration::from_secs(1);
 
-/// How long to sleep when a slow poll is detected. During this window we do
-/// NOT touch the device at all — any read (even a single probe) interferes
-/// with the HID Sensor Hub's resume initialisation and prevents recovery.
+/// Fallback backoff duration. During this window we do NOT touch the device
+/// at all — any read (even a single probe) interferes with the HID Sensor
+/// Hub's resume initialisation and prevents recovery.
 const POLL_BACKOFF_SLEEP: Duration = Duration::from_secs(3);
 
 /// Driver for reading IIO IMU data
@@ -183,10 +185,9 @@ impl Driver {
             }
         }
 
-        // HID Sensor Hub raw reads are synchronous Get-Feature transactions.
-        // After suspend/resume the hub needs time to re-initialise; if we keep
-        // hammering it with requests the reads stay slow indefinitely.  Back
-        // off completely (no reads at all) to let the hub finish its resume.
+        // Fallback safety net: if the logind-based suspend pause didn't fire
+        // (or fired too late), detect slow reads and back off. See constants
+        // POLL_SLOW_THRESHOLD / POLL_BACKOFF_SLEEP for details.
         let elapsed = start.elapsed();
         if elapsed > POLL_SLOW_THRESHOLD {
             log::warn!(

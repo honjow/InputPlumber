@@ -378,7 +378,24 @@ impl<T: SourceInputDevice + SourceOutputDevice + Send + 'static> SourceDriver<T>
                 if let Err(e) = implementation.update_event_filter(event_filter.clone()) {
                     log::error!("Failed to set default event filter for {device_id}: {e}");
                 };
+                let mut is_suspended = false;
                 loop {
+                    // When suspended (system sleeping / resuming), skip polling
+                    // entirely so we don't interfere with hardware re-init.
+                    if is_suspended {
+                        if let Err(e) = SourceDriver::receive_commands(
+                            &mut rx,
+                            &mut implementation,
+                            &mut event_filter,
+                            &mut is_suspended,
+                        ) {
+                            log::debug!("Error receiving commands: {:?}", e);
+                            break;
+                        }
+                        thread::sleep(self.options.poll_rate);
+                        continue;
+                    }
+
                     // Create a context with performance metrics for each event
                     let mut context = if metrics_enabled {
                         Some(EventContext::new())
@@ -445,6 +462,7 @@ impl<T: SourceInputDevice + SourceOutputDevice + Send + 'static> SourceDriver<T>
                         &mut rx,
                         &mut implementation,
                         &mut event_filter,
+                        &mut is_suspended,
                     ) {
                         log::debug!("Error receiving commands: {:?}", e);
                         break;
@@ -471,6 +489,7 @@ impl<T: SourceInputDevice + SourceOutputDevice + Send + 'static> SourceDriver<T>
         rx: &mut mpsc::Receiver<SourceCommand>,
         implementation: &mut MutexGuard<'_, T>,
         event_filter: &mut HashSet<Capability>,
+        is_suspended: &mut bool,
     ) -> Result<(), Box<dyn Error>> {
         const MAX_COMMANDS: u8 = 64;
         let mut commands_processed = 0;
@@ -522,6 +541,14 @@ impl<T: SourceInputDevice + SourceOutputDevice + Send + 'static> SourceDriver<T>
                         if let Err(e) = sender.send(events) {
                             log::error!("Failed to get filtered events: {e}");
                         };
+                    }
+                    SourceCommand::Suspend => {
+                        log::debug!("Source device suspended");
+                        *is_suspended = true;
+                    }
+                    SourceCommand::Resume => {
+                        log::debug!("Source device resumed");
+                        *is_suspended = false;
                     }
                 },
                 Err(e) => match e {

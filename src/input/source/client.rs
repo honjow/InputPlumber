@@ -137,6 +137,16 @@ impl SourceDeviceClient {
         Ok(())
     }
 
+    /// Pause polling on the source device (e.g. during system suspend).
+    pub async fn suspend(&self) -> Result<(), ClientError> {
+        self.send(SourceCommand::Suspend).await
+    }
+
+    /// Resume polling on the source device (e.g. after system resume).
+    pub async fn resume(&self) -> Result<(), ClientError> {
+        self.send(SourceCommand::Resume).await
+    }
+
     /// Stop the source device.
     pub async fn stop(&self) -> Result<(), ClientError> {
         self.tx.send(SourceCommand::Stop).await?;
