@@ -121,9 +121,9 @@ impl IioDevice {
             return DriverType::BmiImu;
         }
 
-        // AccelGryo3D
+        // AccelGryo3D (HID Sensor Hub — Intel ISH / AMD SFH)
         if glob_match("{gyro_3d,accel_3d}", name) {
-            log::info!("Detected Legion Go");
+            log::info!("Detected HID Sensor Hub IMU: {name}");
             return DriverType::AccelGryo3D;
         }
         log::debug!("No driver found for IIO Interface: {name}");

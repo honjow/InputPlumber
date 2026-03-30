@@ -41,7 +41,16 @@ source_devices:
       product_id: 0x1901
       interface_num: 2
 
-  # IMU
+  # IMU (AMD SFH via hid_sensor_gyro_3d / hid_sensor_accel_3d)
+  # NOTE: The stock amd_sfh kernel driver (sfh1_1/amd_sfh_desc.c) has integer
+  # division errors (/100 for accel, /1000 for gyro) that destroy precision.
+  # A kernel patch changing these to /10 is required for usable IMU data.
+  - group: imu
+    iio:
+      name: accel_3d
+  - group: imu
+    iio:
+      name: gyro_3d
 
 # Optional configuration for the composite device
 options:
