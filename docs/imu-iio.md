@@ -202,9 +202,9 @@ added once the mount matrix is verified.
 | MSI Claw A1M mount matrix needs physical verification | Fixed – identity matrix |
 | MSI Claw 7 / Claw 8 A2VM missing IMU config | Open |
 | `_available` attribute WARNs in log (harmless) | Cosmetic |
-| **Suspend/resume: raw attr reads block after wake** | **Fixed — poll backoff** |
+| **Suspend/resume: raw attr reads block after wake** | **Fixed — logind signal + poll backoff fallback** |
 
-### Suspend/Resume Problem (Open)
+### Suspend/Resume Problem (Fixed)
 
 **Confirmed facts (tested 2026-03-31 on MSI Claw A1M):**
 
@@ -237,16 +237,30 @@ added once the mount matrix is verified.
 - `gyro_3d` is affected more than `accel_3d`, possibly because they share a
   single HID Sensor Hub and the gyro driver's resume takes longer.
 
-**Solution (verified 2026-03-31):**
+**Solution (two layers):**
 
-In `Driver::poll()`, measure the wall-clock time of each poll cycle. If it
-exceeds `POLL_SLOW_THRESHOLD` (1 s), sleep for `POLL_BACKOFF_SLEEP` (3 s)
-before returning. During this window we do **not touch the device at all** —
-even a single probe read interferes with the hub's resume initialisation and
-prevents recovery. After the silent backoff, normal polling resumes and reads
-return in <10 ms again.
+**Primary — logind PrepareForSleep signal:**
+The Manager subscribes to `org.freedesktop.login1.Manager.PrepareForSleep` on
+the system D-Bus. When the signal fires (`true` = going to sleep), the Manager
+sends `SystemSleep` through the existing command chain:
+`Manager → CompositeDevice → SourceDevices (suspend)`.
+Each SourceDriver sets `is_suspended = true` and skips `poll()` entirely.
+When the signal fires again (`false` = waking up), `SystemWake` flows through
+the same chain and SourceDrivers resume polling. This is self-contained — no
+external systemd service required.
 
-Tested values:
+The existing `inputplumber-suspend.service` (calling `HookSleep`/`HookWake`
+via busctl) is still supported as a compatible fallback for systems where the
+D-Bus signal path doesn't work. Both paths produce the same `SystemSleep` /
+`SystemWake` commands internally.
+
+**Fallback — poll timing backoff (driver.rs):**
+If the logind signal is missed or delayed, `Driver::poll()` measures the
+wall-clock time of each poll cycle. If it exceeds `POLL_SLOW_THRESHOLD`
+(1 s), it sleeps for `POLL_BACKOFF_SLEEP` (3 s) to let the hub finish its
+resume initialisation.
+
+Tested values for the fallback:
 - 1 s backoff: not enough, hub stays slow
 - 3 s backoff: works reliably
 - Probe-based recovery (read every 500 ms until fast): **fails** — any read
