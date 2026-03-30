@@ -203,6 +203,7 @@ added once the mount matrix is verified.
 | MSI Claw 7 / Claw 8 A2VM missing IMU config | Open |
 | `_available` attribute WARNs in log (harmless) | Cosmetic |
 | **Suspend/resume: raw attr reads block after wake** | **Fixed — logind signal + poll backoff fallback** |
+| **gyro_3d stalls at non-100 Hz sampling rates** | **Hardware limitation — do not change** |
 
 ### Suspend/Resume Problem (Fixed)
 
@@ -273,3 +274,29 @@ Tested values for the fallback:
   `buffer/enable` 0→1 toggling damages the HID Sensor Hub state, requiring a
   full system reboot to recover. **Reverted — do not re-attempt without kernel
   driver changes.**
+
+### gyro_3d Non-100 Hz Sampling Rate Stall (Hardware Limitation)
+
+**Tested 2026-03-31 on MSI Claw A1M — no IPB involved (pure Python repro).**
+
+The HID Sensor Hub's `gyro_3d` only works reliably at 100 Hz. Setting any
+other sampling frequency (e.g. 90 → actual 90.9, 80 → 83.3, 50) causes raw
+attribute reads to return a **frozen value** when read in rapid succession.
+
+| Sampling rate | Rapid reads (no delay) | 200 ms interval |
+|---------------|----------------------|-----------------|
+| 100 Hz | Normal (unique values) | Normal |
+| 90.9 Hz | **Frozen** | Normal |
+| 50 Hz | **Frozen** | Normal |
+
+At 50 Hz the minimum usable read interval is ~200 ms (i.e. max ~5 reads/sec),
+which is far too slow for IMU use. This is a HID Sensor Hub hardware/driver
+limitation, not an InputPlumber bug — the same behaviour reproduces with a
+trivial Python script and no InputPlumber running.
+
+`accel_3d` is not affected; it supports 500 Hz and works fine with rapid reads
+at any configured rate.
+
+**Recommendation:** Do not set `sample_rate` for `gyro_3d` on MSI Claw devices.
+The default init path writes 200 Hz which the hardware clamps to 100 Hz — this
+is the only rate that works correctly with rapid polling.
