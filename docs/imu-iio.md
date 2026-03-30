@@ -64,11 +64,23 @@ different from a dedicated BMI chip wired to I2C/SPI.
 
 ### IIO Devices Created
 
+The HID Sensor Hub creates 4 IIO devices. The device numbering is **stable
+across suspend/resume cycles** but **may change across reboots**.
+
+Observed mappings (examples — check actual device on each boot):
+
 ```
-iio:device0  name: gyro_3d           driver: hid_sensor_gyro_3d
-iio:device2  name: accel_3d          driver: hid_sensor_accel_3d
-iio:device3  name: gravity           (unused by InputPlumber)
-iio:device4  name: relative_orientation  (unused by InputPlumber)
+# After one boot:
+iio:device0 = gyro_3d
+iio:device1 = accel_3d
+iio:device2 = relative_orientation
+iio:device3 = gravity
+
+# After a different boot:
+iio:device0 = accel_3d
+iio:device1 = gravity
+iio:device2 = relative_orientation
+iio:device3 = gyro_3d
 ```
 
 > **Note**: Accelerometer and gyroscope are exposed as **separate IIO devices**
@@ -190,3 +202,60 @@ added once the mount matrix is verified.
 | MSI Claw A1M mount matrix needs physical verification | Fixed – identity matrix |
 | MSI Claw 7 / Claw 8 A2VM missing IMU config | Open |
 | `_available` attribute WARNs in log (harmless) | Cosmetic |
+| **Suspend/resume: raw attr reads block after wake** | **Fixed — poll backoff** |
+
+### Suspend/Resume Problem (Open)
+
+**Confirmed facts (tested 2026-03-31 on MSI Claw A1M):**
+
+1. **Device numbering is stable across suspend/resume** — only changes on
+   reboot.
+2. **Without InputPlumber running**: manually setting `sampling_frequency` and
+   reading `in_anglvel_x_raw` via `cat` works normally before AND after
+   suspend/resume. Reads return in <10 ms. No blocking, no stale data.
+3. **With InputPlumber running**: after suspend/resume, `raw` attr reads become
+   extremely slow. Measured timings:
+   - `gyro_3d` channels: **2500–5000 ms per read** (sometimes times out entirely)
+   - `accel_3d` channels: **73–199 ms per read** (10–20× slower than normal)
+   Restarting the service alone does not fix it; stopping the service, waiting
+   a few seconds, then starting again does.
+4. **Changing `sampling_frequency` while IPB is polling**: causes reads to freeze
+   immediately. Changing back to the original value un-freezes them.
+
+**What this tells us:**
+
+- The problem is **IPB's continuous rapid polling competing with the kernel's
+  HID Sensor Hub for the same HID transport** during and after resume.
+- Each `raw` sysfs read triggers a synchronous HID Get-Feature transaction.
+  IPB polls 3 gyro + 3 accel channels in a tight loop, so 6 HID transactions
+  run back-to-back. After resume, the sensor hub needs time to re-initialise
+  its power state; IPB's rapid polling during this window floods the HID
+  transport and prevents the hub from completing its resume sequence.
+- Simply not running InputPlumber avoids the problem entirely, which means the
+  kernel's own resume path works fine — InputPlumber's polling interferes with
+  it somehow.
+- `gyro_3d` is affected more than `accel_3d`, possibly because they share a
+  single HID Sensor Hub and the gyro driver's resume takes longer.
+
+**Solution (verified 2026-03-31):**
+
+In `Driver::poll()`, measure the wall-clock time of each poll cycle. If it
+exceeds `POLL_SLOW_THRESHOLD` (1 s), sleep for `POLL_BACKOFF_SLEEP` (3 s)
+before returning. During this window we do **not touch the device at all** —
+even a single probe read interferes with the hub's resume initialisation and
+prevents recovery. After the silent backoff, normal polling resumes and reads
+return in <10 ms again.
+
+Tested values:
+- 1 s backoff: not enough, hub stays slow
+- 3 s backoff: works reliably
+- Probe-based recovery (read every 500 ms until fast): **fails** — any read
+  during the resume window keeps the hub in a degraded state indefinitely
+
+**Failed approaches (do not repeat):**
+
+- IIO triggered buffer mode (`IioRawBuffer` with `/dev/iio:deviceX`): buffer
+  data flow stops after resume and cannot be reliably re-established. Repeated
+  `buffer/enable` 0→1 toggling damages the HID Sensor Hub state, requiring a
+  full system reboot to recover. **Reverted — do not re-attempt without kernel
+  driver changes.**
