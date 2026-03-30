@@ -103,6 +103,14 @@ impl Driver {
     //a standalone crate. When this driver is eventually separated, refactor the Event type to
     //follow the pattern DeviceEvent(Event, Value) and create a match table for
     //Capability->Event/Event->Capability in the SourceDriver implementation.
+    pub fn has_accel(&self) -> bool {
+        !self.accel.is_empty()
+    }
+
+    pub fn has_gyro(&self) -> bool {
+        !self.gyro.is_empty()
+    }
+
     pub fn update_filtered_events(&mut self, events: HashSet<Capability>) {
         self.filtered_events = events;
     }
@@ -152,12 +160,14 @@ impl Driver {
                 events.push(event);
             }
         }
-
         Ok(events)
     }
 
     /// Polls all the channels from the accelerometer
     fn poll_accel(&self) -> Result<Option<Event>, Box<dyn Error + Send + Sync>> {
+        if self.accel.is_empty() {
+            return Ok(None);
+        }
         // Read from each accel channel
         let mut accel_input = AxisData::default();
         for (id, channel) in self.accel.iter() {
@@ -186,7 +196,10 @@ impl Driver {
 
     /// Polls all the channels from the gyro
     fn poll_gyro(&self) -> Result<Option<Event>, Box<dyn Error + Send + Sync>> {
-        // Read from each accel channel
+        if self.gyro.is_empty() {
+            return Ok(None);
+        }
+        // Read from each gyro channel
         let mut gyro_input = AxisData::default();
         for (id, channel) in self.gyro.iter() {
             // Get the info for the axis and read the data
@@ -342,4 +355,115 @@ fn is_driver_loaded(driver_name: &str) -> io::Result<bool> {
         }
     }
     Ok(false)
+}
+
+/// Try to set the sampling rate for the given channels.
+///
+/// Priority:
+/// 1. `target_rate` from YAML config — explicit user override
+/// 2. Max value from the hardware's `_available` list (per-channel or device-level)
+/// 3. `DEFAULT_SAMPLE_RATE` fallback when neither source is available
+///
+/// The chosen rate is then applied with a two-step write strategy:
+/// - Per-channel attribute first (BMI / Legion Go: `in_anglvel_x_sampling_frequency`)
+/// - Device-level global attribute fallback (HID Sensor Hub: `in_anglvel_sampling_frequency`)
+fn set_sample_rate(
+    device: &Device,
+    channels: &HashMap<String, Channel>,
+    channel_type: ChannelType,
+    target_rate: Option<f64>,
+) {
+    let rate = if let Some(r) = target_rate {
+        log::debug!("Using configured sample rate: {r} Hz");
+        r
+    } else {
+        let avail = read_sample_rates_available(device, channels, &channel_type);
+        if !avail.is_empty() {
+            let max = avail.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            log::debug!("Using max available sample rate: {max} Hz");
+            max
+        } else {
+            log::debug!("No available rates found, using default: {DEFAULT_SAMPLE_RATE} Hz");
+            DEFAULT_SAMPLE_RATE
+        }
+    };
+
+    // Step 1: try per-channel attribute (BMI / Legion Go style).
+    for (id, channel) in channels.iter() {
+        match channel.attr_write_float("sampling_frequency", rate) {
+            Ok(_) => {
+                let actual = channel
+                    .attr_read_float("sampling_frequency")
+                    .unwrap_or(rate);
+                log::debug!("Set sampling_frequency to {actual} Hz via channel {id}");
+                return;
+            }
+            Err(e) => {
+                log::debug!(
+                    "Per-channel sampling_frequency write failed for {id}: {e:?}, trying device-level"
+                );
+            }
+        }
+    }
+
+    // Step 2: fall back to device-level global attribute (HID Sensor Hub style).
+    let attr = match channel_type {
+        ChannelType::Accel => "in_accel_sampling_frequency",
+        ChannelType::AnglVel => "in_anglvel_sampling_frequency",
+        _ => {
+            log::warn!("Unknown channel type, cannot set sampling rate");
+            return;
+        }
+    };
+
+    match device.attr_write_float(attr, rate) {
+        Ok(_) => {
+            let actual = device.attr_read_float(attr).unwrap_or(rate);
+            log::info!("Set device-level {attr} to {actual} Hz");
+        }
+        Err(e) => {
+            log::warn!("Failed to set {attr}: {e:?}");
+        }
+    }
+}
+
+/// Read the list of supported sampling rates from the hardware.
+/// Tries per-channel attribute first, then device-level global attribute.
+/// Returns an empty vec if neither is available.
+fn read_sample_rates_available(
+    device: &Device,
+    channels: &HashMap<String, Channel>,
+    channel_type: &ChannelType,
+) -> Vec<f64> {
+    // Per-channel (BMI / Legion Go style).
+    for (_, channel) in channels.iter() {
+        if let Ok(v) = channel.attr_read_str("sampling_frequency_available") {
+            let rates: Vec<f64> = v
+                .split_whitespace()
+                .filter_map(|s| s.parse().ok())
+                .collect();
+            if !rates.is_empty() {
+                return rates;
+            }
+        }
+    }
+
+    // Device-level global (HID Sensor Hub style).
+    let attr = match channel_type {
+        ChannelType::Accel => "in_accel_sampling_frequency_available",
+        ChannelType::AnglVel => "in_anglvel_sampling_frequency_available",
+        _ => return vec![],
+    };
+
+    if let Ok(v) = device.attr_read_str(attr) {
+        let rates: Vec<f64> = v
+            .split_whitespace()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        if !rates.is_empty() {
+            return rates;
+        }
+    }
+
+    vec![]
 }
