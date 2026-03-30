@@ -203,10 +203,33 @@ configuration needed).
 
 > **Kernel patch required** — see [AMD SFH Precision Fix](#amd-sfh-precision-fix-kernel-patch-required).
 
-### MSI Claw 7 / Claw 8 A2VM
+### MSI Claw 8 AI+ A2VM (`50-msi_claw8_a2vm.yaml`)
 
-These models currently have **no IMU configuration**. IMU support needs to be
-added once the mount matrix is verified.
+Uses Intel Lunar Lake ISH (PCI `8086:a845`). **IMU not available on Linux.**
+
+Unlike the Claw A1M (Meteor Lake, ROM-based ISH firmware), Lunar Lake requires
+external firmware loading from `/lib/firmware/intel/ish/`. The ISH bootloader
+on this device does not respond to the Linux kernel's firmware transfer commands
+(`LOADER_CMD_XFER_FRAGMENT` times out after 3 retries).
+
+**Diagnosis (2026-03-31):**
+
+| Item | Detail |
+|------|--------|
+| ISH PCI | `8086:a845` (Lunar Lake-M Integrated Sensor Hub) |
+| Firmware tried | `ish_lnlm.bin` (generic) and `ish_lnlm_fb1c3c07.bin` (MSI vendor CRC) |
+| Error | `ISH loader: cmd 2 failed 10` ×3 (firmware transfer timeout) |
+| Windows firmware | Extracted from `DriverStore`, different MD5 from generic — same failure |
+| Other buses | No IMU on I2C / SPI / platform |
+| Windows driver | ISH works in Windows (firmware at `FwImage/0003/ishS_SI_5.8.0.7718.bin`) |
+
+The problem is at the IPC protocol level between the host CPU and ISH
+bootloader ROM, not the firmware content. Likely requires kernel driver changes
+or vendor cooperation with Intel to resolve.
+
+### MSI Claw 7
+
+No IMU configuration yet. Needs hardware testing.
 
 ---
 
@@ -220,7 +243,8 @@ added once the mount matrix is verified.
 | Incorrect scaling factors in `AccelGyro3dImu` | Fixed |
 | MSI Claw A1M mount matrix needs physical verification | Fixed – identity matrix |
 | MSI Claw A8 BZ2EM IMU support | Fixed — kernel patch required for precision |
-| MSI Claw 7 / Claw 8 A2VM missing IMU config | Open |
+| MSI Claw 8 AI+ A2VM IMU | Blocked — ISH firmware loading fails on Linux |
+| MSI Claw 7 missing IMU config | Open |
 | `_available` attribute WARNs in log (harmless) | Cosmetic |
 | **Suspend/resume: raw attr reads block after wake** | **Fixed — logind signal + poll backoff fallback** |
 | **gyro_3d stalls at non-100 Hz sampling rates** | **Hardware limitation — do not change** |
