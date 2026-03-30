@@ -41,7 +41,8 @@ impl BmiImu {
 
         let id = device_info.sysname();
         let name = device_info.name();
-        let driver = Driver::new(id, name, mount_matrix)?;
+        let sample_rate = config.as_ref().and_then(|c| c.sample_rate);
+        let driver = Driver::new(id, name, mount_matrix, sample_rate)?;
 
         Ok(Self { driver })
     }

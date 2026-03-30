@@ -47,7 +47,8 @@ impl AccelGyro3dImu {
 
         let id = device_info.sysname();
         let name = device_info.name();
-        let driver = Driver::new(id, name, mount_matrix)?;
+        let sample_rate = config.as_ref().and_then(|c| c.sample_rate);
+        let driver = Driver::new(id, name, mount_matrix, sample_rate)?;
 
         let mut capabilities = vec![];
         if driver.has_accel() {

@@ -17,6 +17,10 @@ use super::{
     info::AxisInfo,
 };
 
+/// Target sampling rate to request on initialization when neither the config
+/// nor the hardware's `_available` list provides a value.
+const DEFAULT_SAMPLE_RATE: f64 = 200.0;
+
 /// Driver for reading IIO IMU data
 pub struct Driver {
     mount_matrix: MountMatrix,
@@ -33,6 +37,7 @@ impl Driver {
         id: String,
         name: String,
         matrix: Option<MountMatrix>,
+        target_sample_rate: Option<f64>,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         log::debug!("Creating IIO IMU driver instance for {name}");
 
@@ -87,7 +92,13 @@ impl Driver {
             }
         }
 
-        // Calculate the initial sample delay
+        // Request a higher sampling rate. Hardware will clamp to its own maximum.
+        if !accel.is_empty() {
+            set_sample_rate(&device, &accel, ChannelType::Accel, target_sample_rate);
+        }
+        if !gyro.is_empty() {
+            set_sample_rate(&device, &gyro, ChannelType::AnglVel, target_sample_rate);
+        }
 
         Ok(Self {
             mount_matrix,
