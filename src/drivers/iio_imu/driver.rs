@@ -3,6 +3,7 @@ use std::{
     error::Error,
     fs::File,
     io::{self, BufRead, BufReader},
+    time::{Duration, Instant},
 };
 
 use industrial_io::{Channel, ChannelType, Device, Direction};
@@ -20,6 +21,15 @@ use super::{
 /// Target sampling rate to request on initialization when neither the config
 /// nor the hardware's `_available` list provides a value.
 const DEFAULT_SAMPLE_RATE: f64 = 200.0;
+
+/// If a single poll() cycle takes longer than this, assume the HID Sensor Hub
+/// is recovering from suspend/resume and back off to let it finish.
+const POLL_SLOW_THRESHOLD: Duration = Duration::from_secs(1);
+
+/// How long to sleep when a slow poll is detected. During this window we do
+/// NOT touch the device at all — any read (even a single probe) interferes
+/// with the HID Sensor Hub's resume initialisation and prevents recovery.
+const POLL_BACKOFF_SLEEP: Duration = Duration::from_secs(3);
 
 /// Driver for reading IIO IMU data
 pub struct Driver {
@@ -150,6 +160,7 @@ impl Driver {
 
     /// Poll the device for data
     pub fn poll(&self) -> Result<Vec<Event>, Box<dyn Error + Send + Sync>> {
+        let start = Instant::now();
         let mut events = vec![];
 
         // Read from the accelerometer
@@ -171,6 +182,23 @@ impl Driver {
                 events.push(event);
             }
         }
+
+        // HID Sensor Hub raw reads are synchronous Get-Feature transactions.
+        // After suspend/resume the hub needs time to re-initialise; if we keep
+        // hammering it with requests the reads stay slow indefinitely.  Back
+        // off completely (no reads at all) to let the hub finish its resume.
+        let elapsed = start.elapsed();
+        if elapsed > POLL_SLOW_THRESHOLD {
+            log::warn!(
+                "IIO poll took {:.1}s (threshold {:.1}s); sensor hub likely resuming. \
+                 Backing off {:.0}s (no reads during this window).",
+                elapsed.as_secs_f64(),
+                POLL_SLOW_THRESHOLD.as_secs_f64(),
+                POLL_BACKOFF_SLEEP.as_secs_f64(),
+            );
+            std::thread::sleep(POLL_BACKOFF_SLEEP);
+        }
+
         Ok(events)
     }
 
@@ -260,6 +288,7 @@ impl Driver {
         value.pitch = mxy * x + myy * y + mzy * z;
         value.yaw = mxz * x + myz * y + mzz * z;
     }
+
 }
 
 /// Returns all channels and channel information from the given device matching
