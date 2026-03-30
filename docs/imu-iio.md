@@ -2,7 +2,7 @@
 
 This document describes how InputPlumber handles IMU (Inertial Measurement Unit)
 devices exposed via the Linux IIO (Industrial I/O) subsystem, including findings
-from testing on devices using the Intel HID Sensor Hub.
+from testing on devices using the Intel HID Sensor Hub and AMD Sensor Fusion Hub.
 
 ## Driver Architecture
 
@@ -61,6 +61,9 @@ different from a dedicated BMI chip wired to I2C/SPI.
 
 - MSI Claw A1M (Intel Core Ultra, HID Sensor Hub `8087:0AC2`)
 - Potentially other Intel-based handhelds
+
+> For AMD-based devices (e.g. MSI Claw A8 BZ2EM), see the
+> [AMD Sensor Fusion Hub](#amd-sensor-fusion-hub-sfh) section below.
 
 ### IIO Devices Created
 
@@ -184,6 +187,22 @@ is specified.
     name: gyro_3d
 ```
 
+### MSI Claw A8 BZ2EM (`50-msi_claw_a8_bz2e.yaml`)
+
+Uses AMD SFH (Sensor Fusion Hub). Mount matrix verified: identity (no explicit
+configuration needed).
+
+```yaml
+- group: imu
+  iio:
+    name: accel_3d
+- group: imu
+  iio:
+    name: gyro_3d
+```
+
+> **Kernel patch required** — see [AMD SFH Precision Fix](#amd-sfh-precision-fix-kernel-patch-required).
+
 ### MSI Claw 7 / Claw 8 A2VM
 
 These models currently have **no IMU configuration**. IMU support needs to be
@@ -200,6 +219,7 @@ added once the mount matrix is verified.
 | `AccelGyro3dImu` emits zero values when accel/gyro are separate IIO devices | Fixed |
 | Incorrect scaling factors in `AccelGyro3dImu` | Fixed |
 | MSI Claw A1M mount matrix needs physical verification | Fixed – identity matrix |
+| MSI Claw A8 BZ2EM IMU support | Fixed — kernel patch required for precision |
 | MSI Claw 7 / Claw 8 A2VM missing IMU config | Open |
 | `_available` attribute WARNs in log (harmless) | Cosmetic |
 | **Suspend/resume: raw attr reads block after wake** | **Fixed — logind signal + poll backoff fallback** |
@@ -300,3 +320,54 @@ at any configured rate.
 **Recommendation:** Do not set `sample_rate` for `gyro_3d` on MSI Claw devices.
 The default init path writes 200 Hz which the hardware clamps to 100 Hz — this
 is the only rate that works correctly with rapid polling.
+
+---
+
+## AMD Sensor Fusion Hub (SFH)
+
+AMD-based handhelds (e.g. MSI Claw A8 BZ2EM, Lenovo Legion Go) use the AMD
+Sensor Fusion Hub (`amd_sfh` kernel module) instead of Intel ISH. The SFH
+connects via PCIe and exposes the same `accel_3d` / `gyro_3d` IIO device names,
+so InputPlumber's `AccelGyro3d` driver handles them identically.
+
+### Differences from Intel ISH
+
+| Aspect | Intel ISH | AMD SFH |
+|--------|-----------|---------|
+| Bus | HID over USB/I2C | HID over PCIe |
+| Default sampling rate | 10 Hz | 0 Hz (must be set explicitly) |
+| `_available` sysfs attrs | Missing | Missing |
+| Suspend/resume sensitivity | High (see above) | TBD |
+
+### AMD SFH Precision Fix (Kernel Patch Required)
+
+**Tested 2026-03-31 on MSI Claw A8 BZ2EM.**
+
+The stock `amd_sfh` kernel driver (`sfh1_1/amd_sfh_desc.c`) contains integer
+division errors when converting firmware float values to HID report integers:
+
+| Sensor | Stock divisor | Correct divisor | Precision loss |
+|--------|--------------|----------------|---------------|
+| Accelerometer | `/100` | `/10` | 10× (z-axis reads −0.98 instead of −9.81 m/s²) |
+| Gyroscope | `/1000` | `/10` | 100× (dynamic range ±1.43° instead of ±143°/s) |
+
+The HID report descriptor uses Unit Exponent −2 (0.01 units), so the firmware
+values (already in appropriate scale) only need `/10` to produce correct HID
+report values. The stock `/100` and `/1000` divisors discard too much precision
+via integer truncation.
+
+**Fix:** In `drivers/hid/amd-sfh-hid/sfh1_1/amd_sfh_desc.c`, change:
+
+```c
+// Accelerometer: /100 → /10
+acc_input.in_accel_x_value = amd_sfh_float_to_int(accel_data.acceldata.x) / 10;
+acc_input.in_accel_y_value = amd_sfh_float_to_int(accel_data.acceldata.y) / 10;
+acc_input.in_accel_z_value = amd_sfh_float_to_int(accel_data.acceldata.z) / 10;
+
+// Gyroscope: /1000 → /10
+gyro_input.in_angel_x_value = amd_sfh_float_to_int(gyro_data.gyrodata.x) / 10;
+gyro_input.in_angel_y_value = amd_sfh_float_to_int(gyro_data.gyrodata.y) / 10;
+gyro_input.in_angel_z_value = amd_sfh_float_to_int(gyro_data.gyrodata.z) / 10;
+```
+
+This fix also applies to the Lenovo Legion Go (same AMD SFH driver).
