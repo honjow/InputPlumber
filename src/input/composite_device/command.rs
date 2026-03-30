@@ -51,6 +51,7 @@ pub enum CompositeCommand {
     SourceDeviceAdded(DeviceInfo),
     SourceDeviceRemoved(DeviceInfo),
     SourceDeviceStopped(DeviceInfo),
+    TranslatableStaleTimeout(Capability, u64),
     #[allow(dead_code)]
     UpdateSourceCapabilities(String, HashSet<Capability>),
     UpdateTargetCapabilities(String, HashSet<Capability>),
