@@ -29,6 +29,7 @@ pub struct AccelGyro3dImu {
     device_id: String,
     device_name: String,
     mount_matrix: Option<MountMatrix>,
+    use_buffer: Option<bool>,
     sample_rate: Option<f64>,
     event_filter: HashSet<Capability>,
 }
@@ -82,6 +83,7 @@ impl AccelGyro3dImu {
             device_id: id,
             device_name: name,
             mount_matrix,
+            use_buffer,
             sample_rate,
             event_filter: HashSet::new(),
         })
@@ -131,12 +133,12 @@ impl SourceInputDevice for AccelGyro3dImu {
             self.device_id.clone(),
             self.device_name.clone(),
             self.mount_matrix.clone(),
-            Some(false),
+            self.use_buffer,
             self.sample_rate,
         ) {
             Ok(mut new_driver) => {
                 new_driver.update_filtered_events(self.event_filter.clone());
-                log::info!("IIO driver recreated for {name} (sysfs mode)");
+                log::info!("IIO driver recreated for {name} after resume");
                 self.driver = Some(new_driver);
             }
             Err(e) => {
