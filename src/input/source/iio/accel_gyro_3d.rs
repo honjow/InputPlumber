@@ -4,6 +4,7 @@ use std::{
     f64::consts::PI,
     fmt::Debug,
     os::fd::RawFd,
+    time::Duration,
 };
 
 use crate::{
@@ -17,9 +18,19 @@ use crate::{
     udev::device::UdevDevice,
 };
 
+/// After suspend/resume, all IIO handles must be released and the HID
+/// Sensor Hub needs a quiet period before we re-open them.
+const RESUME_RECOVER_DELAY: Duration = Duration::from_secs(3);
+
 pub struct AccelGyro3dImu {
-    driver: Driver,
+    driver: Option<Driver>,
     capabilities: Vec<Capability>,
+    // Stored for driver recreation after resume
+    device_id: String,
+    device_name: String,
+    mount_matrix: Option<MountMatrix>,
+    sample_rate: Option<f64>,
+    event_filter: HashSet<Capability>,
 }
 
 impl AccelGyro3dImu {
@@ -51,7 +62,7 @@ impl AccelGyro3dImu {
 
         let id = device_info.sysname();
         let name = device_info.name();
-        let driver = Driver::new(id, name, mount_matrix, use_buffer, sample_rate)?;
+        let driver = Driver::new(id.clone(), name.clone(), mount_matrix.clone(), use_buffer, sample_rate)?;
 
         let mut capabilities = vec![];
         if driver.has_accel() {
@@ -65,41 +76,90 @@ impl AccelGyro3dImu {
             capabilities
         );
 
-        Ok(Self { driver, capabilities })
+        Ok(Self {
+            driver: Some(driver),
+            capabilities,
+            device_id: id,
+            device_name: name,
+            mount_matrix,
+            sample_rate,
+            event_filter: HashSet::new(),
+        })
     }
 }
 
 impl SourceInputDevice for AccelGyro3dImu {
-    /// Poll the given input device for input events
     fn poll(&mut self) -> Result<Vec<NativeEvent>, InputError> {
-        let events = self.driver.poll()?;
-        let native_events = translate_events(events);
-        Ok(native_events)
+        let Some(ref mut driver) = self.driver else {
+            return Ok(vec![]);
+        };
+        let events = driver.poll()?;
+        Ok(translate_events(events))
     }
 
-    /// Returns the possible input events this device is capable of emitting
     fn get_capabilities(&self) -> Result<Vec<Capability>, InputError> {
         Ok(self.capabilities.clone())
     }
 
     fn get_poll_fds(&self) -> Vec<RawFd> {
-        self.driver.poll_fd().into_iter().collect()
+        self.driver
+            .as_ref()
+            .and_then(|d| d.poll_fd())
+            .into_iter()
+            .collect()
+    }
+
+    fn on_suspend(&mut self) {
+        let name = &self.device_name;
+        // Tear down the driver BEFORE suspend while the sensor hub is
+        // still operational. This prevents stale buffer/trigger state
+        // from interfering with the kernel's suspend/resume sequence.
+        log::info!("Tearing down IIO driver for {name} before suspend");
+        self.driver = None;
+    }
+
+    fn on_resume(&mut self) {
+        let name = &self.device_name;
+        if self.driver.is_some() {
+            return;
+        }
+
+        log::info!("Recreating IIO driver for {name} after resume");
+        std::thread::sleep(RESUME_RECOVER_DELAY);
+
+        match Driver::new(
+            self.device_id.clone(),
+            self.device_name.clone(),
+            self.mount_matrix.clone(),
+            Some(false),
+            self.sample_rate,
+        ) {
+            Ok(mut new_driver) => {
+                new_driver.update_filtered_events(self.event_filter.clone());
+                log::info!("IIO driver recreated for {name} (sysfs mode)");
+                self.driver = Some(new_driver);
+            }
+            Err(e) => {
+                log::error!("Failed to recreate IIO driver for {name}: {e}");
+            }
+        }
     }
 
     fn update_event_filter(&mut self, events: HashSet<Capability>) -> Result<(), InputError> {
-        self.driver.update_filtered_events(events);
+        self.event_filter = events.clone();
+        if let Some(ref mut driver) = self.driver {
+            driver.update_filtered_events(events);
+        }
         Ok(())
     }
 
     fn get_default_event_filter(&self) -> Result<HashSet<Capability>, InputError> {
-        let filtered_events = self.driver.get_default_event_filter();
-        let filtered_events = match filtered_events {
-            Ok(events) => events,
-            Err(e) => {
-                return Err(format!("Failed to get default event filter: {:?}", e).into());
-            }
+        let Some(ref driver) = self.driver else {
+            return Ok(HashSet::new());
         };
-        Ok(filtered_events)
+        driver
+            .get_default_event_filter()
+            .map_err(|e| format!("Failed to get default event filter: {:?}", e).into())
     }
 }
 

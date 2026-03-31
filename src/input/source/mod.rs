@@ -134,6 +134,16 @@ pub trait SourceInputDevice {
     fn get_default_event_filter(&self) -> Result<HashSet<Capability>, InputError> {
         Ok(HashSet::new())
     }
+
+    /// Called when the system is about to suspend. The hardware is still
+    /// fully operational so sysfs writes are safe. Implementations should
+    /// tear down state (e.g. IIO buffers/triggers) that would interfere
+    /// with the kernel's suspend/resume sequence.
+    fn on_suspend(&mut self) {}
+
+    /// Called after the source device resumes from system suspend.
+    /// Implementations can use this to reinitialize hardware state.
+    fn on_resume(&mut self) {}
 }
 
 /// A [SourceOutputDevice] is a device implementation that can handle output events
@@ -387,11 +397,12 @@ impl<T: SourceInputDevice + SourceOutputDevice + Send + 'static> SourceDriver<T>
                     log::error!("Failed to set default event filter for {device_id}: {e}");
                 };
                 let mut is_suspended = false;
+                let mut was_suspended = false;
 
                 // Check if the device provides pollable file descriptors for
                 // data-driven event delivery (e.g. IIO buffer mode).
-                let poll_fds_raw = implementation.get_poll_fds();
-                let use_fd_polling = !poll_fds_raw.is_empty();
+                let mut poll_fds_raw = implementation.get_poll_fds();
+                let mut use_fd_polling = !poll_fds_raw.is_empty();
                 if use_fd_polling {
                     log::info!("Using fd-driven polling for {device_id}");
                 }
@@ -400,6 +411,7 @@ impl<T: SourceInputDevice + SourceOutputDevice + Send + 'static> SourceDriver<T>
                     // When suspended (system sleeping / resuming), skip polling
                     // entirely so we don't interfere with hardware re-init.
                     if is_suspended {
+                        was_suspended = true;
                         if let Err(e) = SourceDriver::receive_commands(
                             &mut rx,
                             &mut implementation,
@@ -411,6 +423,17 @@ impl<T: SourceInputDevice + SourceOutputDevice + Send + 'static> SourceDriver<T>
                         }
                         thread::sleep(self.options.poll_rate);
                         continue;
+                    }
+
+                    // Just transitioned from suspended → active: let the
+                    // implementation reinitialize hardware state and refresh
+                    // poll fds (e.g. IIO buffer may have been recreated).
+                    if was_suspended {
+                        was_suspended = false;
+                        log::info!("Source device {device_id} resuming, reinitializing");
+                        implementation.on_resume();
+                        poll_fds_raw = implementation.get_poll_fds();
+                        use_fd_polling = !poll_fds_raw.is_empty();
                     }
 
                     // Create a context with performance metrics for each event
@@ -578,7 +601,8 @@ impl<T: SourceInputDevice + SourceOutputDevice + Send + 'static> SourceDriver<T>
                         };
                     }
                     SourceCommand::Suspend => {
-                        log::debug!("Source device suspended");
+                        log::debug!("Source device suspending");
+                        implementation.on_suspend();
                         *is_suspended = true;
                     }
                     SourceCommand::Resume => {
