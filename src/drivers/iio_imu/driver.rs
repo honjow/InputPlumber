@@ -137,7 +137,7 @@ impl Driver {
         let rate = sample_rate.unwrap_or(DEFAULT_SAMPLE_RATE);
 
         let read_mode = if should_try_buffer {
-            match try_buffer_mode(&ctx, &device, &accel, &gyro, rate) {
+            match try_buffer_mode(&ctx, &device, &name, &accel, &gyro, rate) {
                 Ok(mode) => {
                     log::info!("IIO buffer mode enabled for {name}");
                     mode
@@ -402,6 +402,7 @@ impl Driver {
 fn try_buffer_mode(
     ctx: &Context,
     device: &Device,
+    device_name: &str,
     accel: &HashMap<String, Channel>,
     gyro: &HashMap<String, Channel>,
     sample_rate: f64,
@@ -411,7 +412,7 @@ fn try_buffer_mode(
     let device_id = device.id().unwrap_or_default();
     cleanup_iio_buffer_state(&device_id);
 
-    let trig = trigger::find_trigger(ctx, sample_rate)
+    let trig = trigger::find_trigger(ctx, device_name, sample_rate)
         .ok_or("No suitable IIO trigger found")?;
 
     device.set_trigger(&trig)?;
