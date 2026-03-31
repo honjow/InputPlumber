@@ -398,6 +398,15 @@ pub struct IIO {
     )]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mount_matrix: Option<MountMatrix>,
+    /// Whether to use IIO buffer mode for data-driven reading.
+    /// None = auto-detect (try buffer, fall back to sysfs),
+    /// Some(true) = force buffer mode,
+    /// Some(false) = force sysfs polling.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub use_buffer: Option<bool>,
+    /// Target sampling rate in Hz for the IMU sensor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_rate: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]

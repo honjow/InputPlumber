@@ -1,4 +1,4 @@
-use std::{collections::HashSet, error::Error, f64::consts::PI, fmt::Debug};
+use std::{collections::HashSet, error::Error, f64::consts::PI, fmt::Debug, os::fd::RawFd};
 
 use crate::{
     config,
@@ -39,9 +39,12 @@ impl BmiImu {
             None
         };
 
+        let use_buffer = config.as_ref().and_then(|c| c.use_buffer);
+        let sample_rate = config.as_ref().and_then(|c| c.sample_rate);
+
         let id = device_info.sysname();
         let name = device_info.name();
-        let driver = Driver::new(id, name, mount_matrix)?;
+        let driver = Driver::new(id, name, mount_matrix, use_buffer, sample_rate)?;
 
         Ok(Self { driver })
     }
@@ -58,6 +61,10 @@ impl SourceInputDevice for BmiImu {
     /// Returns the possible input events this device is capable of emitting
     fn get_capabilities(&self) -> Result<Vec<Capability>, InputError> {
         Ok(CAPABILITIES.into())
+    }
+
+    fn get_poll_fds(&self) -> Vec<RawFd> {
+        self.driver.poll_fd().into_iter().collect()
     }
 
     fn update_event_filter(&mut self, events: HashSet<Capability>) -> Result<(), InputError> {
