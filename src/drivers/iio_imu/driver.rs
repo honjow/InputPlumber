@@ -3,9 +3,10 @@ use std::{
     error::Error,
     fs::File,
     io::{self, BufRead, BufReader},
+    os::fd::RawFd,
 };
 
-use industrial_io::{Channel, ChannelType, Device, Direction};
+use industrial_io::{Channel, ChannelType, Context, Device, Direction};
 
 use crate::{
     drivers::iio_imu::info::MountMatrix,
@@ -15,9 +16,20 @@ use crate::{
 use super::{
     event::{AxisData, Event},
     info::AxisInfo,
+    trigger,
 };
 
 const DEFAULT_SAMPLE_RATE: f64 = 200.0;
+const DEFAULT_BUFFER_SAMPLES: usize = 1;
+
+enum ReadMode {
+    Sysfs,
+    Buffer {
+        buffer: industrial_io::Buffer,
+        poll_fd: RawFd,
+        storage_bits: u32,
+    },
+}
 
 /// Driver for reading IIO IMU data
 pub struct Driver {
@@ -29,6 +41,7 @@ pub struct Driver {
     gyro_info: HashMap<String, AxisInfo>,
     /// List of events that should not be generated
     filtered_events: HashSet<Capability>,
+    read_mode: ReadMode,
 }
 
 impl Driver {
@@ -36,12 +49,13 @@ impl Driver {
         id: String,
         name: String,
         matrix: Option<MountMatrix>,
+        use_buffer: Option<bool>,
         sample_rate: Option<f64>,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         log::debug!("Creating IIO IMU driver instance for {name}");
 
         // Create an IIO local context used to query for devices
-        let ctx = industrial_io::context::Context::new()?;
+        let ctx = Context::new()?;
         log::debug!("IIO context version: {}", ctx.version());
 
         // Find the IMU device
@@ -98,6 +112,27 @@ impl Driver {
             set_sample_rate(&device, &gyro, ChannelType::AnglVel, sample_rate);
         }
 
+        let should_try_buffer = use_buffer.unwrap_or(true);
+        let rate = sample_rate.unwrap_or(DEFAULT_SAMPLE_RATE);
+
+        let read_mode = if should_try_buffer {
+            match try_buffer_mode(&ctx, &device, &name, &accel, &gyro, rate) {
+                Ok(mode) => {
+                    log::info!("IIO buffer mode enabled for {name}");
+                    mode
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Buffer mode unavailable for {name}, using sysfs fallback: {e}"
+                    );
+                    ReadMode::Sysfs
+                }
+            }
+        } else {
+            log::info!("Buffer mode disabled by config for {name}, using sysfs");
+            ReadMode::Sysfs
+        };
+
         Ok(Self {
             _device: device,
             mount_matrix,
@@ -106,6 +141,7 @@ impl Driver {
             gyro,
             gyro_info,
             filtered_events: Default::default(),
+            read_mode,
         })
     }
 
@@ -123,6 +159,13 @@ impl Driver {
 
     pub fn update_filtered_events(&mut self, events: HashSet<Capability>) {
         self.filtered_events = events;
+    }
+
+    pub fn poll_fd(&self) -> Option<RawFd> {
+        match &self.read_mode {
+            ReadMode::Buffer { poll_fd, .. } => Some(*poll_fd),
+            ReadMode::Sysfs => None,
+        }
     }
 
     pub fn get_default_event_filter(
@@ -148,7 +191,15 @@ impl Driver {
     }
 
     /// Poll the device for data
-    pub fn poll(&self) -> Result<Vec<Event>, Box<dyn Error + Send + Sync>> {
+    pub fn poll(&mut self) -> Result<Vec<Event>, Box<dyn Error + Send + Sync>> {
+        if matches!(self.read_mode, ReadMode::Buffer { .. }) {
+            self.poll_buffer()
+        } else {
+            self.poll_sysfs()
+        }
+    }
+
+    fn poll_sysfs(&self) -> Result<Vec<Event>, Box<dyn Error + Send + Sync>> {
         let mut events = vec![];
 
         // Read from the accelerometer
@@ -156,7 +207,7 @@ impl Driver {
             .filtered_events
             .contains(&Capability::Accelerometer(Source::Center))
         {
-            if let Some(event) = self.poll_accel()? {
+            if let Some(event) = self.poll_accel_sysfs()? {
                 events.push(event);
             }
         }
@@ -166,7 +217,7 @@ impl Driver {
             .filtered_events
             .contains(&Capability::Gyroscope(Source::Center))
         {
-            if let Some(event) = self.poll_gyro()? {
+            if let Some(event) = self.poll_gyro_sysfs()? {
                 events.push(event);
             }
         }
@@ -174,8 +225,74 @@ impl Driver {
         Ok(events)
     }
 
+    fn poll_buffer(&mut self) -> Result<Vec<Event>, Box<dyn Error + Send + Sync>> {
+        let ReadMode::Buffer {
+            ref mut buffer,
+            storage_bits,
+            ..
+        } = self.read_mode
+        else {
+            unreachable!();
+        };
+
+        if let Err(e) = buffer.refill() {
+            log::trace!("Buffer refill: {e}");
+            return Ok(vec![]);
+        }
+
+        let mut events = vec![];
+
+        if !self
+            .filtered_events
+            .contains(&Capability::Accelerometer(Source::Center))
+            && !self.accel.is_empty()
+        {
+            let mut data = AxisData::default();
+            for (id, channel) in &self.accel {
+                if let Some(info) = self.accel_info.get(id) {
+                    if let Some(raw) = read_buffer_sample(buffer, channel, storage_bits) {
+                        let value = (raw + info.offset) as f64 * info.scale;
+                        match id.chars().last() {
+                            Some('x') => data.roll = value,
+                            Some('y') => data.pitch = value,
+                            Some('z') => data.yaw = value,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            rotate_value(&self.mount_matrix, &mut data);
+            events.push(Event::Accelerometer(data));
+        }
+
+        if !self
+            .filtered_events
+            .contains(&Capability::Gyroscope(Source::Center))
+            && !self.gyro.is_empty()
+        {
+            let mut data = AxisData::default();
+            for (id, channel) in &self.gyro {
+                if let Some(info) = self.gyro_info.get(id) {
+                    if let Some(raw) = read_buffer_sample(buffer, channel, storage_bits) {
+                        let value = (raw + info.offset) as f64 * info.scale;
+                        match id.chars().last() {
+                            Some('x') => data.roll = value,
+                            Some('y') => data.pitch = value,
+                            Some('z') => data.yaw = value,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            rotate_value(&self.mount_matrix, &mut data);
+            events.push(Event::Gyro(data));
+        }
+
+        Ok(events)
+    }
+
     /// Polls all the channels from the accelerometer
-    fn poll_accel(&self) -> Result<Option<Event>, Box<dyn Error + Send + Sync>> {
+    fn poll_accel_sysfs(&self) -> Result<Option<Event>, Box<dyn Error + Send + Sync>> {
         if self.accel.is_empty() {
             return Ok(None);
         }
@@ -207,7 +324,7 @@ impl Driver {
     }
 
     /// Polls all the channels from the gyro
-    fn poll_gyro(&self) -> Result<Option<Event>, Box<dyn Error + Send + Sync>> {
+    fn poll_gyro_sysfs(&self) -> Result<Option<Event>, Box<dyn Error + Send + Sync>> {
         if self.gyro.is_empty() {
             return Ok(None);
         }
@@ -245,21 +362,138 @@ impl Driver {
     //   y' = mxy * x + myy * y + mzy * z
     //   z' = mxz * x + myz * y + mzz * z
     fn rotate_value(&self, value: &mut AxisData) {
-        let x = value.roll;
-        let y = value.pitch;
-        let z = value.yaw;
-        let mxx = self.mount_matrix.x.0;
-        let myx = self.mount_matrix.x.1;
-        let mzx = self.mount_matrix.x.2;
-        let mxy = self.mount_matrix.y.0;
-        let myy = self.mount_matrix.y.1;
-        let mzy = self.mount_matrix.y.2;
-        let mxz = self.mount_matrix.z.0;
-        let myz = self.mount_matrix.z.1;
-        let mzz = self.mount_matrix.z.2;
-        value.roll = mxx * x + myx * y + mzx * z;
-        value.pitch = mxy * x + myy * y + mzy * z;
-        value.yaw = mxz * x + myz * y + mzz * z;
+        rotate_value(&self.mount_matrix, value);
+    }
+}
+
+fn rotate_value(m: &MountMatrix, value: &mut AxisData) {
+    let x = value.roll;
+    let y = value.pitch;
+    let z = value.yaw;
+    value.roll = m.x.0 * x + m.x.1 * y + m.x.2 * z;
+    value.pitch = m.y.0 * x + m.y.1 * y + m.y.2 * z;
+    value.yaw = m.z.0 * x + m.z.1 * y + m.z.2 * z;
+}
+
+fn try_buffer_mode(
+    ctx: &Context,
+    device: &Device,
+    name: &str,
+    accel: &HashMap<String, Channel>,
+    gyro: &HashMap<String, Channel>,
+    sample_rate: f64,
+) -> Result<ReadMode, Box<dyn Error + Send + Sync>> {
+    let device_id = device.id().unwrap_or_default();
+
+    cleanup_iio_buffer_state(&device_id);
+
+    let trigger = trigger::find_trigger(ctx, name, sample_rate)
+        .ok_or("No suitable IIO trigger found")?;
+
+    let trigger_name = trigger.name().unwrap_or_default();
+    log::debug!("Binding trigger {trigger_name} to {name}");
+    device.set_trigger(&trigger)?;
+
+    let mut enabled = 0u32;
+    for channel in accel.values().chain(gyro.values()) {
+        if channel.is_scan_element() {
+            channel.enable();
+            enabled += 1;
+        }
+    }
+    if enabled == 0 {
+        return Err("No scan elements available for buffer mode".into());
+    }
+
+    let storage_bits = detect_storage_bits(&device_id);
+    log::info!("Detected scan element storage bits: {storage_bits}");
+
+    let buffer = device.create_buffer(DEFAULT_BUFFER_SAMPLES, false)?;
+    buffer.set_blocking_mode(false)?;
+
+    let fd = buffer.poll_fd()? as RawFd;
+    log::info!("IIO buffer created: {enabled} channels, poll_fd={fd}");
+
+    Ok(ReadMode::Buffer {
+        buffer,
+        poll_fd: fd,
+        storage_bits,
+    })
+}
+
+fn read_buffer_sample(
+    buffer: &industrial_io::Buffer,
+    channel: &Channel,
+    storage_bits: u32,
+) -> Option<i64> {
+    match storage_bits {
+        16 => buffer.channel_iter::<i16>(channel).last().map(|&v| v as i64),
+        32 => buffer.channel_iter::<i32>(channel).last().map(|&v| v as i64),
+        64 => buffer.channel_iter::<i64>(channel).last().copied(),
+        _ => {
+            log::warn!("Unsupported scan element storage bits: {storage_bits}");
+            None
+        }
+    }
+}
+
+// Parse storage bits from sysfs type string, e.g. "le:s16/16>>0" → 16
+fn detect_storage_bits(device_id: &str) -> u32 {
+    let base = format!("/sys/bus/iio/devices/{device_id}/scan_elements");
+    for name in ["in_accel_x_type", "in_anglvel_x_type", "in_accel_y_type", "in_anglvel_y_type"] {
+        let path = format!("{base}/{name}");
+        if let Ok(type_str) = std::fs::read_to_string(&path) {
+            if let Some(slash) = type_str.find('/') {
+                if let Some(shift) = type_str.find(">>") {
+                    if let Ok(bits) = type_str[slash + 1..shift].parse::<u32>() {
+                        return bits;
+                    }
+                }
+            }
+        }
+    }
+    log::warn!("Could not detect storage bits from sysfs, defaulting to 32");
+    32
+}
+
+fn cleanup_iio_buffer_state(device_id: &str) {
+    let base = format!("/sys/bus/iio/devices/{device_id}");
+
+    let buf_enable = format!("{base}/buffer/enable");
+    if let Ok(val) = std::fs::read_to_string(&buf_enable) {
+        if val.trim() == "1" {
+            log::info!("Cleaning up residual IIO buffer state for {device_id}");
+            if let Err(e) = std::fs::write(&buf_enable, "0") {
+                log::warn!("Failed to disable residual buffer: {e}");
+                return;
+            }
+        }
+    }
+
+    let trigger_path = format!("{base}/trigger/current_trigger");
+    if let Ok(val) = std::fs::read_to_string(&trigger_path) {
+        if !val.trim().is_empty() {
+            if let Err(e) = std::fs::write(&trigger_path, "") {
+                log::debug!("Failed to unbind residual trigger: {e}");
+            }
+        }
+    }
+
+    let scan_dir = format!("{base}/scan_elements");
+    if let Ok(entries) = std::fs::read_dir(&scan_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.ends_with("_en") {
+                if let Ok(val) = std::fs::read_to_string(entry.path()) {
+                    if val.trim() == "1" {
+                        if let Err(e) = std::fs::write(entry.path(), "0") {
+                            log::debug!("Failed to disable scan element {name}: {e}");
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

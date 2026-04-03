@@ -40,11 +40,12 @@ impl AccelGyro3dImu {
             None
         };
 
+        let use_buffer = config.as_ref().and_then(|c| c.use_buffer);
         let sample_rate = config.as_ref().and_then(|c| c.sample_rate);
 
         let id = device_info.sysname();
         let name = device_info.name();
-        let driver = Driver::new(id, name, mount_matrix, sample_rate)?;
+        let driver = Driver::new(id, name, mount_matrix, use_buffer, sample_rate)?;
 
         // accel and gyro may be separate IIO devices on HID Sensor Hub
         let mut capabilities = vec![];
