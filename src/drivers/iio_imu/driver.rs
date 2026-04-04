@@ -3,6 +3,7 @@ use std::{
     error::Error,
     fs::File,
     io::{self, BufRead, BufReader},
+    time::{Duration, Instant},
 };
 
 use industrial_io::{Channel, ChannelType, Device, Direction};
@@ -18,6 +19,9 @@ use super::{
 };
 
 const DEFAULT_SAMPLE_RATE: f64 = 200.0;
+
+const POLL_SLOW_THRESHOLD: Duration = Duration::from_secs(1);
+const POLL_BACKOFF_SLEEP: Duration = Duration::from_secs(3);
 
 /// Driver for reading IIO IMU data
 pub struct Driver {
@@ -149,9 +153,9 @@ impl Driver {
 
     /// Poll the device for data
     pub fn poll(&self) -> Result<Vec<Event>, Box<dyn Error + Send + Sync>> {
+        let start = Instant::now();
         let mut events = vec![];
 
-        // Read from the accelerometer
         if !self
             .filtered_events
             .contains(&Capability::Accelerometer(Source::Center))
@@ -161,7 +165,6 @@ impl Driver {
             }
         }
 
-        // Read from the gyro
         if !self
             .filtered_events
             .contains(&Capability::Gyroscope(Source::Center))
@@ -169,6 +172,12 @@ impl Driver {
             if let Some(event) = self.poll_gyro()? {
                 events.push(event);
             }
+        }
+
+        let elapsed = start.elapsed();
+        if elapsed > POLL_SLOW_THRESHOLD {
+            log::warn!("Slow sysfs poll ({elapsed:?}), backing off");
+            std::thread::sleep(POLL_BACKOFF_SLEEP);
         }
 
         Ok(events)
