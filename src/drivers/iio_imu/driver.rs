@@ -4,6 +4,7 @@ use std::{
     fs::File,
     io::{self, BufRead, BufReader},
     os::fd::RawFd,
+    time::{Duration, Instant},
 };
 
 use industrial_io::{Channel, ChannelType, Context, Device, Direction};
@@ -21,6 +22,9 @@ use super::{
 
 const DEFAULT_SAMPLE_RATE: f64 = 200.0;
 const DEFAULT_BUFFER_SAMPLES: usize = 1;
+
+const POLL_SLOW_THRESHOLD: Duration = Duration::from_secs(1);
+const POLL_BACKOFF_SLEEP: Duration = Duration::from_secs(3);
 
 enum ReadMode {
     Sysfs,
@@ -200,6 +204,7 @@ impl Driver {
     }
 
     fn poll_sysfs(&self) -> Result<Vec<Event>, Box<dyn Error + Send + Sync>> {
+        let start = Instant::now();
         let mut events = vec![];
 
         // Read from the accelerometer
@@ -220,6 +225,16 @@ impl Driver {
             if let Some(event) = self.poll_gyro_sysfs()? {
                 events.push(event);
             }
+        }
+
+        let elapsed = start.elapsed();
+        if elapsed > POLL_SLOW_THRESHOLD {
+            log::warn!(
+                "IIO poll took {:.1}s; sensor hub likely resuming, backing off {:.0}s",
+                elapsed.as_secs_f64(),
+                POLL_BACKOFF_SLEEP.as_secs_f64(),
+            );
+            std::thread::sleep(POLL_BACKOFF_SLEEP);
         }
 
         Ok(events)
