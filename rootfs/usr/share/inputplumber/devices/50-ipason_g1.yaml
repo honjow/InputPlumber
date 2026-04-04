@@ -27,6 +27,7 @@ source_devices:
       name: "SHANWAN Android Gamepad"
       phys_path: usb-0000:c4:00.3-5/input0
       handler: event*
+    capability_map_id: dinput_generic
 
   - group: keyboard
     evdev:
