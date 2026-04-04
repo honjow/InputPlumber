@@ -3,6 +3,7 @@ use std::{
     error::Error,
     f64::consts::PI,
     fmt::Debug,
+    os::fd::RawFd,
     time::Duration,
 };
 
@@ -24,6 +25,7 @@ pub struct BmiImu {
     device_id: String,
     device_name: String,
     mount_matrix: Option<MountMatrix>,
+    use_buffer: Option<bool>,
     sample_rate: Option<f64>,
     event_filter: HashSet<Capability>,
 }
@@ -52,17 +54,19 @@ impl BmiImu {
             None
         };
 
+        let use_buffer = config.as_ref().and_then(|c| c.use_buffer);
         let sample_rate = config.as_ref().and_then(|c| c.sample_rate);
 
         let id = device_info.sysname();
         let name = device_info.name();
-        let driver = Driver::new(id.clone(), name.clone(), mount_matrix.clone(), sample_rate)?;
+        let driver = Driver::new(id.clone(), name.clone(), mount_matrix.clone(), use_buffer, sample_rate)?;
 
         Ok(Self {
             driver: Some(driver),
             device_id: id,
             device_name: name,
             mount_matrix,
+            use_buffer,
             sample_rate,
             event_filter: HashSet::new(),
         })
@@ -82,9 +86,18 @@ impl SourceInputDevice for BmiImu {
         Ok(CAPABILITIES.into())
     }
 
+    fn get_poll_fds(&self) -> Vec<RawFd> {
+        self.driver
+            .as_ref()
+            .and_then(|d| d.poll_fd())
+            .into_iter()
+            .collect()
+    }
+
     fn on_suspend(&mut self) {
         let name = &self.device_name;
         log::info!("Tearing down IIO driver for {name} before suspend");
+        disable_iio_buffer(&self.device_id);
         self.driver = None;
     }
 
@@ -97,10 +110,14 @@ impl SourceInputDevice for BmiImu {
         log::info!("Recreating IIO driver for {name} after resume");
         std::thread::sleep(RESUME_RECOVER_DELAY);
 
+        // BMI260 data-ready trigger breaks after suspend; hrtimer works around it
+        ensure_hrtimer_trigger();
+
         match Driver::new(
             self.device_id.clone(),
             self.device_name.clone(),
             self.mount_matrix.clone(),
+            self.use_buffer,
             self.sample_rate,
         ) {
             Ok(mut new_driver) => {
@@ -144,10 +161,12 @@ impl Debug for BmiImu {
 // a single thread.
 unsafe impl Send for BmiImu {}
 
+/// Translate the given driver events into native events
 fn translate_events(events: Vec<iio_imu::event::Event>) -> Vec<NativeEvent> {
     events.into_iter().map(translate_event).collect()
 }
 
+/// Translate the given driver event into a native event
 fn translate_event(event: iio_imu::event::Event) -> NativeEvent {
     match event {
         iio_imu::event::Event::Accelerometer(data) => {
@@ -160,6 +179,11 @@ fn translate_event(event: iio_imu::event::Event) -> NativeEvent {
             NativeEvent::new(cap, value)
         }
         iio_imu::event::Event::Gyro(data) => {
+            // Translate gyro values into the expected units of degrees per sec
+            // We apply a 12x scale so the lowest (default) value feels like natural 1:1 motion.
+            // Adjusting the scale will increase the granularity of the motion by slowing
+            // incrementing closer to 2:1 motion. From testing this is the highest scale we can
+            // apply before noise is amplified to the point the gyro cannot calibrate.
             let cap = Capability::Gamepad(Gamepad::Gyro);
             let value = InputValue::Vector3 {
                 x: Some(data.roll * (180.0 / PI) * 12.0),
@@ -171,7 +195,52 @@ fn translate_event(event: iio_imu::event::Event) -> NativeEvent {
     }
 }
 
+/// List of all capabilities that the driver implements
 pub const CAPABILITIES: &[Capability] = &[
     Capability::Gamepad(Gamepad::Accelerometer),
     Capability::Gamepad(Gamepad::Gyro),
 ];
+
+fn ensure_hrtimer_trigger() {
+    const TRIGGER_NAME: &str = "inputplumber_hrtimer";
+    let configfs_path = format!(
+        "/sys/kernel/config/iio/triggers/hrtimer/{TRIGGER_NAME}"
+    );
+
+    if std::path::Path::new(&configfs_path).exists() {
+        log::debug!("hrtimer trigger already exists");
+        return;
+    }
+
+    if let Err(e) = std::process::Command::new("modprobe")
+        .arg("iio-trig-hrtimer")
+        .status()
+    {
+        log::warn!("Failed to load iio-trig-hrtimer module: {e}");
+    }
+
+    match std::fs::create_dir_all(&configfs_path) {
+        Ok(()) => log::info!("Created hrtimer trigger: {TRIGGER_NAME}"),
+        Err(e) => log::warn!("Failed to create hrtimer trigger: {e}"),
+    }
+}
+
+fn disable_iio_buffer(device_id: &str) {
+    let base = format!("/sys/bus/iio/devices/{device_id}");
+
+    if let Err(e) = std::fs::write(format!("{base}/buffer/enable"), "0") {
+        log::debug!("Failed to disable IIO buffer for {device_id}: {e}");
+    }
+    let _ = std::fs::write(format!("{base}/trigger/current_trigger"), "");
+
+    let scan_dir = format!("{base}/scan_elements");
+    if let Ok(entries) = std::fs::read_dir(&scan_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().ends_with("_en") {
+                let _ = std::fs::write(entry.path(), "0");
+            }
+        }
+    }
+}
+
