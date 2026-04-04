@@ -55,6 +55,19 @@ source_devices:
       interface_number: "00"
       sys_name: "ttyUSB*"
       subsystem: tty
+
+  - group: touchscreen
+    udev:
+      properties:
+        - name: ID_INPUT_TOUCHSCREEN
+          value: "1"
+      sys_name: "event*"
+      subsystem: input
+    config:
+      touchscreen:
+        grab: true
+        orientation: "left"
+
   - group: imu
     iio:
       name: "{i2c-BMI0260:00,i2c-BOSC0260:00,bmi260}"
