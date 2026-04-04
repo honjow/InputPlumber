@@ -49,7 +49,6 @@ pub fn find_trigger(ctx: &Context, device_name: &str, sample_rate: f64) -> Optio
 
 fn try_set_trigger_rate(dev: &Device, name: &str, sample_rate: f64) {
     if dev.find_attr("sampling_frequency").is_none() {
-        log::debug!("Trigger {name} has no sampling_frequency attr, skipping");
         return;
     }
     if let Err(e) = dev.attr_write("sampling_frequency", sample_rate as i64) {

@@ -133,7 +133,6 @@ pub trait SourceInputDevice {
     }
 
     fn on_suspend(&mut self) {}
-
     fn on_resume(&mut self) {}
 }
 

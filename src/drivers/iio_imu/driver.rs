@@ -43,7 +43,6 @@ pub struct Driver {
     accel_info: HashMap<String, AxisInfo>,
     gyro: HashMap<String, Channel>,
     gyro_info: HashMap<String, AxisInfo>,
-    /// List of events that should not be generated
     filtered_events: HashSet<Capability>,
     read_mode: ReadMode,
 }
