@@ -1,4 +1,11 @@
-use std::{collections::HashSet, error::Error, f64::consts::PI, fmt::Debug, os::fd::RawFd};
+use std::{
+    collections::HashSet,
+    error::Error,
+    f64::consts::PI,
+    fmt::Debug,
+    os::fd::RawFd,
+    time::Duration,
+};
 
 use crate::{
     config,
@@ -11,8 +18,17 @@ use crate::{
     udev::device::UdevDevice,
 };
 
+const RESUME_RECOVER_DELAY: Duration = Duration::from_secs(3);
+
 pub struct BmiImu {
-    driver: Driver,
+    driver: Option<Driver>,
+    // Stored for driver recreation after resume
+    device_id: String,
+    device_name: String,
+    mount_matrix: Option<MountMatrix>,
+    use_buffer: Option<bool>,
+    sample_rate: Option<f64>,
+    event_filter: HashSet<Capability>,
 }
 
 impl BmiImu {
@@ -44,43 +60,98 @@ impl BmiImu {
 
         let id = device_info.sysname();
         let name = device_info.name();
-        let driver = Driver::new(id, name, mount_matrix, use_buffer, sample_rate)?;
+        let driver = Driver::new(id.clone(), name.clone(), mount_matrix.clone(), use_buffer, sample_rate)?;
 
-        Ok(Self { driver })
+        Ok(Self {
+            driver: Some(driver),
+            device_id: id,
+            device_name: name,
+            mount_matrix,
+            use_buffer,
+            sample_rate,
+            event_filter: HashSet::new(),
+        })
     }
 }
 
 impl SourceInputDevice for BmiImu {
-    /// Poll the given input device for input events
     fn poll(&mut self) -> Result<Vec<NativeEvent>, InputError> {
-        let events = self.driver.poll()?;
-        let native_events = translate_events(events);
-        Ok(native_events)
+        let Some(ref mut driver) = self.driver else {
+            return Ok(vec![]);
+        };
+        let events = driver.poll()?;
+        Ok(translate_events(events))
     }
 
-    /// Returns the possible input events this device is capable of emitting
     fn get_capabilities(&self) -> Result<Vec<Capability>, InputError> {
         Ok(CAPABILITIES.into())
     }
 
     fn get_poll_fds(&self) -> Vec<RawFd> {
-        self.driver.poll_fd().into_iter().collect()
+        self.driver
+            .as_ref()
+            .and_then(|d| d.poll_fd())
+            .into_iter()
+            .collect()
+    }
+
+    fn on_suspend(&mut self) {
+        let name = &self.device_name;
+        log::info!("Tearing down IIO driver for {name} before suspend");
+        disable_iio_buffer(&self.device_id);
+        self.driver = None;
+    }
+
+    fn on_resume(&mut self) {
+        let name = &self.device_name;
+        if self.driver.is_some() {
+            return;
+        }
+
+        log::info!("Recreating IIO driver for {name} after resume");
+        std::thread::sleep(RESUME_RECOVER_DELAY);
+
+        // The BMI260 kernel driver has a bug where the data-ready trigger's
+        // interrupt pin configuration (INT_IO_CTRL) is lost after suspend
+        // because chip_init() does a soft reset but resume only restores the
+        // interrupt mapping, not the pin config. As a workaround, ensure an
+        // hrtimer trigger exists so the Driver can use software-driven buffer
+        // mode instead of the broken hardware trigger.
+        ensure_hrtimer_trigger();
+
+        match Driver::new(
+            self.device_id.clone(),
+            self.device_name.clone(),
+            self.mount_matrix.clone(),
+            self.use_buffer,
+            self.sample_rate,
+        ) {
+            Ok(mut new_driver) => {
+                new_driver.update_filtered_events(self.event_filter.clone());
+                log::info!("IIO driver recreated for {name} after resume");
+                self.driver = Some(new_driver);
+            }
+            Err(e) => {
+                log::error!("Failed to recreate IIO driver for {name}: {e}");
+            }
+        }
     }
 
     fn update_event_filter(&mut self, events: HashSet<Capability>) -> Result<(), InputError> {
-        self.driver.update_filtered_events(events);
+        self.event_filter = events.clone();
+        if let Some(ref mut driver) = self.driver {
+            driver.update_filtered_events(events);
+        }
         Ok(())
     }
 
     fn get_default_event_filter(&self) -> Result<HashSet<Capability>, InputError> {
-        let filtered_events = self.driver.get_default_event_filter();
-        let filtered_events = match filtered_events {
-            Ok(events) => events,
-            Err(e) => {
-                return Err(format!("Failed to get default event filter: {:?}", e).into());
-            }
+        let Some(ref driver) = self.driver else {
+            return Ok(HashSet::new());
         };
-        Ok(filtered_events)
+        driver
+            .get_default_event_filter()
+            .map_err(|e| format!("Failed to get default event filter: {:?}", e).into())
     }
 }
 
@@ -135,3 +206,54 @@ pub const CAPABILITIES: &[Capability] = &[
     Capability::Gamepad(Gamepad::Accelerometer),
     Capability::Gamepad(Gamepad::Gyro),
 ];
+
+/// Ensure an hrtimer-based IIO trigger exists. This provides a software
+/// trigger that works even when the hardware data-ready interrupt is broken
+/// (e.g. after suspend/resume on BMI260). The trigger selection code in
+/// `trigger.rs` already prefers hrtimer over data-ready triggers.
+fn ensure_hrtimer_trigger() {
+    const TRIGGER_NAME: &str = "inputplumber_hrtimer";
+    let configfs_path = format!(
+        "/sys/kernel/config/iio/triggers/hrtimer/{TRIGGER_NAME}"
+    );
+
+    if std::path::Path::new(&configfs_path).exists() {
+        log::debug!("hrtimer trigger already exists");
+        return;
+    }
+
+    // Load the kernel module (may already be loaded)
+    if let Err(e) = std::process::Command::new("modprobe")
+        .arg("iio-trig-hrtimer")
+        .status()
+    {
+        log::warn!("Failed to load iio-trig-hrtimer module: {e}");
+    }
+
+    match std::fs::create_dir_all(&configfs_path) {
+        Ok(()) => log::info!("Created hrtimer trigger: {TRIGGER_NAME}"),
+        Err(e) => log::warn!("Failed to create hrtimer trigger: {e}"),
+    }
+}
+
+/// Disable the IIO buffer and trigger via sysfs so the kernel driver has a
+/// clean state before the system suspends.
+fn disable_iio_buffer(device_id: &str) {
+    let base = format!("/sys/bus/iio/devices/{device_id}");
+
+    if let Err(e) = std::fs::write(format!("{base}/buffer/enable"), "0") {
+        log::debug!("Failed to disable IIO buffer for {device_id}: {e}");
+    }
+    let _ = std::fs::write(format!("{base}/trigger/current_trigger"), "");
+
+    let scan_dir = format!("{base}/scan_elements");
+    if let Ok(entries) = std::fs::read_dir(&scan_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().ends_with("_en") {
+                let _ = std::fs::write(entry.path(), "0");
+            }
+        }
+    }
+}
+
