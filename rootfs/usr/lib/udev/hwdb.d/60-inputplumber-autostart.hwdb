@@ -109,5 +109,7 @@ dmi:*svnOrangePi:pnNEO-01:*
 # Zotac Zone
 dmi:*svnZOTAC:*rnG0A1W:*
 dmi:*svnZOTAC:*rnG1A1W:*
+# IPASON
+dmi:*svnIPASON:pnG1:*
   USE_INPUTPLUMBER=1
 
