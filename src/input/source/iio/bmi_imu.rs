@@ -1,4 +1,10 @@
-use std::{collections::HashSet, error::Error, f64::consts::PI, fmt::Debug};
+use std::{
+    collections::HashSet,
+    error::Error,
+    f64::consts::PI,
+    fmt::Debug,
+    time::Duration,
+};
 
 use crate::{
     config,
@@ -11,8 +17,15 @@ use crate::{
     udev::device::UdevDevice,
 };
 
+const RESUME_RECOVER_DELAY: Duration = Duration::from_secs(3);
+
 pub struct BmiImu {
-    driver: Driver,
+    driver: Option<Driver>,
+    device_id: String,
+    device_name: String,
+    mount_matrix: Option<MountMatrix>,
+    sample_rate: Option<f64>,
+    event_filter: HashSet<Capability>,
 }
 
 impl BmiImu {
@@ -43,39 +56,79 @@ impl BmiImu {
 
         let id = device_info.sysname();
         let name = device_info.name();
-        let driver = Driver::new(id, name, mount_matrix, sample_rate)?;
+        let driver = Driver::new(id.clone(), name.clone(), mount_matrix.clone(), sample_rate)?;
 
-        Ok(Self { driver })
+        Ok(Self {
+            driver: Some(driver),
+            device_id: id,
+            device_name: name,
+            mount_matrix,
+            sample_rate,
+            event_filter: HashSet::new(),
+        })
     }
 }
 
 impl SourceInputDevice for BmiImu {
-    /// Poll the given input device for input events
     fn poll(&mut self) -> Result<Vec<NativeEvent>, InputError> {
-        let events = self.driver.poll()?;
-        let native_events = translate_events(events);
-        Ok(native_events)
+        let Some(ref mut driver) = self.driver else {
+            return Ok(vec![]);
+        };
+        let events = driver.poll()?;
+        Ok(translate_events(events))
     }
 
-    /// Returns the possible input events this device is capable of emitting
     fn get_capabilities(&self) -> Result<Vec<Capability>, InputError> {
         Ok(CAPABILITIES.into())
     }
 
+    fn on_suspend(&mut self) {
+        let name = &self.device_name;
+        log::info!("Tearing down IIO driver for {name} before suspend");
+        self.driver = None;
+    }
+
+    fn on_resume(&mut self) {
+        let name = &self.device_name;
+        if self.driver.is_some() {
+            return;
+        }
+
+        log::info!("Recreating IIO driver for {name} after resume");
+        std::thread::sleep(RESUME_RECOVER_DELAY);
+
+        match Driver::new(
+            self.device_id.clone(),
+            self.device_name.clone(),
+            self.mount_matrix.clone(),
+            self.sample_rate,
+        ) {
+            Ok(mut new_driver) => {
+                new_driver.update_filtered_events(self.event_filter.clone());
+                log::info!("IIO driver recreated for {name} after resume");
+                self.driver = Some(new_driver);
+            }
+            Err(e) => {
+                log::error!("Failed to recreate IIO driver for {name}: {e}");
+            }
+        }
+    }
+
     fn update_event_filter(&mut self, events: HashSet<Capability>) -> Result<(), InputError> {
-        self.driver.update_filtered_events(events);
+        self.event_filter = events.clone();
+        if let Some(ref mut driver) = self.driver {
+            driver.update_filtered_events(events);
+        }
         Ok(())
     }
 
     fn get_default_event_filter(&self) -> Result<HashSet<Capability>, InputError> {
-        let filtered_events = self.driver.get_default_event_filter();
-        let filtered_events = match filtered_events {
-            Ok(events) => events,
-            Err(e) => {
-                return Err(format!("Failed to get default event filter: {:?}", e).into());
-            }
+        let Some(ref driver) = self.driver else {
+            return Ok(HashSet::new());
         };
-        Ok(filtered_events)
+        driver
+            .get_default_event_filter()
+            .map_err(|e| format!("Failed to get default event filter: {:?}", e).into())
     }
 }
 
@@ -91,12 +144,10 @@ impl Debug for BmiImu {
 // a single thread.
 unsafe impl Send for BmiImu {}
 
-/// Translate the given driver events into native events
 fn translate_events(events: Vec<iio_imu::event::Event>) -> Vec<NativeEvent> {
     events.into_iter().map(translate_event).collect()
 }
 
-/// Translate the given driver event into a native event
 fn translate_event(event: iio_imu::event::Event) -> NativeEvent {
     match event {
         iio_imu::event::Event::Accelerometer(data) => {
@@ -109,11 +160,6 @@ fn translate_event(event: iio_imu::event::Event) -> NativeEvent {
             NativeEvent::new(cap, value)
         }
         iio_imu::event::Event::Gyro(data) => {
-            // Translate gyro values into the expected units of degrees per sec
-            // We apply a 12x scale so the lowest (default) value feels like natural 1:1 motion.
-            // Adjusting the scale will increase the granularity of the motion by slowing
-            // incrementing closer to 2:1 motion. From testing this is the highest scale we can
-            // apply before noise is amplified to the point the gyro cannot calibrate.
             let cap = Capability::Gamepad(Gamepad::Gyro);
             let value = InputValue::Vector3 {
                 x: Some(data.roll * (180.0 / PI) * 12.0),
@@ -125,7 +171,6 @@ fn translate_event(event: iio_imu::event::Event) -> NativeEvent {
     }
 }
 
-/// List of all capabilities that the driver implements
 pub const CAPABILITIES: &[Capability] = &[
     Capability::Gamepad(Gamepad::Accelerometer),
     Capability::Gamepad(Gamepad::Gyro),
