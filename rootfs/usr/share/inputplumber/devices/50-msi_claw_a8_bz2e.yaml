@@ -42,6 +42,13 @@ source_devices:
       product_id: "1901"
       phys_path: "usb-0000:c6:00.0-3/input2"
 
+  # Guide button for newer bios (needs kernel patch)
+  - group: keyboard
+    evdev:
+      name: "MSI WMI hotkeys"
+      handler: event*
+      phys_path: "wmi/input0"
+
   - group: gamepad
     passthrough: true
     hidraw:
