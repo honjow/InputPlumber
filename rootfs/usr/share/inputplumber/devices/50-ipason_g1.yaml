@@ -39,6 +39,7 @@ source_devices:
       name: SHANWAN Android Gamepad Consumer Control
       phys_path: usb-0000:c4:00.3-5/input1
       handler: event*
+    capability_map_id: ipason_homepage
   
   - group: imu
     iio:
