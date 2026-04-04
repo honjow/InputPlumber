@@ -15,7 +15,8 @@ use thiserror::Error;
 use crate::{
     dmi::data::DMIData,
     input::{
-        event::{native::NativeEvent, value::InputValue},
+        capability::{Capability, Keyboard},
+        event::{evdev::event_codes_from_capability, native::NativeEvent, value::InputValue},
         info::DeviceInfo,
     },
     udev::device::UdevDevice,
@@ -338,6 +339,11 @@ pub struct Evdev {
     pub vendor_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub product_id: Option<String>,
+    /// List of key names (e.g. ["KeyG", "KeyLeftMeta"]) that the device must
+    /// report in its sysfs capabilities/key bitmap. Useful for disambiguating
+    /// HID devices that expose multiple evdev interfaces under the same name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_keys: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -892,6 +898,28 @@ impl CompositeDeviceConfig {
                 return false;
             }
         }
+
+        if let Some(required_keys) = evdev_config.required_keys.as_ref() {
+            let syspath = device.syspath();
+            for key_name in required_keys {
+                let Ok(key) = key_name.parse::<Keyboard>() else {
+                    log::warn!("Unknown key name in required_keys: {key_name}");
+                    return false;
+                };
+                let codes = event_codes_from_capability(Capability::Keyboard(key));
+                let Some(&code) = codes.first() else {
+                    return false;
+                };
+                if !sysfs_key_bitmap_has_bit(&syspath, code) {
+                    log::trace!(
+                        "Device {syspath} missing required key {key_name} (code {code})"
+                    );
+                    return false;
+                }
+            }
+            log::trace!("Device {syspath} has all required keys: {required_keys:?}");
+        }
+
         true
     }
 
@@ -1127,4 +1155,35 @@ impl CompositeDeviceConfig {
 
         Some(matches)
     }
+}
+
+/// Check whether a given evdev key code bit is set in the sysfs capabilities
+/// bitmap. `syspath` should be the syspath of an event device node (e.g.
+/// `/sys/devices/.../input/inputN/eventX`).
+fn sysfs_key_bitmap_has_bit(syspath: &str, key_code: u16) -> bool {
+    let event_path = std::path::Path::new(syspath);
+    let Some(input_path) = event_path.parent() else {
+        return false;
+    };
+    let caps_path = input_path.join("capabilities").join("key");
+    let Ok(content) = std::fs::read_to_string(&caps_path) else {
+        log::trace!("Could not read capabilities/key at {}", caps_path.display());
+        return false;
+    };
+
+    let bits_per_word = std::mem::size_of::<usize>() * 8;
+    let word_index = key_code as usize / bits_per_word;
+    let bit_index = key_code as usize % bits_per_word;
+
+    // Words are printed highest-first; reverse so index 0 = lowest bits.
+    let words: Vec<&str> = content.split_whitespace().rev().collect();
+    if word_index >= words.len() {
+        return false;
+    }
+
+    let Ok(value) = u64::from_str_radix(words[word_index], 16) else {
+        return false;
+    };
+
+    (value >> bit_index) & 1 == 1
 }
