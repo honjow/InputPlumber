@@ -2,6 +2,7 @@ use std::{
     collections::HashSet,
     error::Error,
     fmt::Debug,
+    os::fd::RawFd,
     time::Duration,
 };
 
@@ -28,6 +29,7 @@ pub struct AccelGyro3dImu {
     device_id: String,
     device_name: String,
     mount_matrix: Option<MountMatrix>,
+    use_buffer: Option<bool>,
     sample_rate: Option<f64>,
     event_filter: HashSet<Capability>,
 }
@@ -56,6 +58,7 @@ impl AccelGyro3dImu {
             None
         };
 
+        let use_buffer = config.as_ref().and_then(|c| c.use_buffer);
         let sample_rate = config.as_ref().and_then(|c| c.sample_rate);
 
         let id = device_info.sysname();
@@ -64,6 +67,7 @@ impl AccelGyro3dImu {
             id.clone(),
             name.clone(),
             mount_matrix.clone(),
+            use_buffer,
             sample_rate,
         )?;
 
@@ -83,6 +87,7 @@ impl AccelGyro3dImu {
             device_id: id,
             device_name: name,
             mount_matrix,
+            use_buffer,
             sample_rate,
             event_filter: HashSet::new(),
         })
@@ -90,6 +95,7 @@ impl AccelGyro3dImu {
 }
 
 impl SourceInputDevice for AccelGyro3dImu {
+    /// Poll the given input device for input events
     fn poll(&mut self) -> Result<Vec<NativeEvent>, InputError> {
         let Some(ref mut driver) = self.driver else {
             return Ok(vec![]);
@@ -98,8 +104,17 @@ impl SourceInputDevice for AccelGyro3dImu {
         Ok(translate_events(events))
     }
 
+    /// Returns the possible input events this device is capable of emitting
     fn get_capabilities(&self) -> Result<Vec<Capability>, InputError> {
         Ok(self.capabilities.clone())
+    }
+
+    fn get_poll_fds(&self) -> Vec<RawFd> {
+        self.driver
+            .as_ref()
+            .and_then(|d| d.poll_fd())
+            .into_iter()
+            .collect()
     }
 
     fn on_suspend(&mut self) {
@@ -119,6 +134,7 @@ impl SourceInputDevice for AccelGyro3dImu {
             self.device_id.clone(),
             self.device_name.clone(),
             self.mount_matrix.clone(),
+            self.use_buffer,
             self.sample_rate,
         ) {
             Ok(mut new_driver) => {
@@ -165,10 +181,12 @@ impl Debug for AccelGyro3dImu {
 // a single thread.
 unsafe impl Send for AccelGyro3dImu {}
 
+/// Translate the given driver events into native events
 fn translate_events(events: Vec<iio_imu::event::Event>) -> Vec<NativeEvent> {
     events.into_iter().map(translate_event).collect()
 }
 
+/// Translate the given driver event into a native event
 fn translate_event(event: iio_imu::event::Event) -> NativeEvent {
     match event {
         iio_imu::event::Event::Accelerometer(data) => {
