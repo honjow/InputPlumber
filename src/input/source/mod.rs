@@ -2,6 +2,7 @@ use std::{
     collections::HashSet,
     env,
     error::Error,
+    os::fd::RawFd,
     str::FromStr,
     sync::{Arc, Mutex, MutexGuard},
     thread,
@@ -115,6 +116,10 @@ pub trait SourceInputDevice {
 
     /// Returns the possible input events this device is capable of emitting
     fn get_capabilities(&self) -> Result<Vec<Capability>, InputError>;
+
+    fn get_poll_fds(&self) -> Vec<RawFd> {
+        vec![]
+    }
 
     /// Updates the list of events that will not propagate from the source device
     fn update_event_filter(&mut self, events: HashSet<Capability>) -> Result<(), InputError> {
@@ -386,8 +391,15 @@ impl<T: SourceInputDevice + SourceOutputDevice + Send + 'static> SourceDriver<T>
                 if let Err(e) = implementation.update_event_filter(event_filter.clone()) {
                     log::error!("Failed to set default event filter for {device_id}: {e}");
                 };
+
                 let mut is_suspended = false;
                 let mut was_suspended = false;
+
+                let mut poll_fds_raw = implementation.get_poll_fds();
+                let mut use_fd_polling = !poll_fds_raw.is_empty();
+                if use_fd_polling {
+                    log::info!("Using fd-driven polling for {device_id}");
+                }
 
                 loop {
                     if is_suspended {
@@ -409,6 +421,8 @@ impl<T: SourceInputDevice + SourceOutputDevice + Send + 'static> SourceDriver<T>
                         was_suspended = false;
                         log::info!("Source device {device_id} resuming, reinitializing");
                         implementation.on_resume();
+                        poll_fds_raw = implementation.get_poll_fds();
+                        use_fd_polling = !poll_fds_raw.is_empty();
                     }
 
                     // Create a context with performance metrics for each event
@@ -472,6 +486,7 @@ impl<T: SourceInputDevice + SourceOutputDevice + Send + 'static> SourceDriver<T>
                         }
                     }
 
+                    // Receive commands/output events
                     if let Err(e) = SourceDriver::receive_commands(
                         &mut rx,
                         &mut implementation,
@@ -482,8 +497,25 @@ impl<T: SourceInputDevice + SourceOutputDevice + Send + 'static> SourceDriver<T>
                         break;
                     }
 
-                    // Sleep for the configured duration
-                    thread::sleep(self.options.poll_rate);
+                    if use_fd_polling {
+                        use std::os::fd::BorrowedFd;
+                        let mut pollfds: Vec<nix::poll::PollFd> = poll_fds_raw
+                            .iter()
+                            .map(|&fd| {
+                                let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+                                nix::poll::PollFd::new(borrowed, nix::poll::PollFlags::POLLIN)
+                            })
+                            .collect();
+                        let timeout_ms = self.options.poll_rate.as_millis() as u16;
+                        match nix::poll::poll(&mut pollfds, timeout_ms) {
+                            Ok(_) | Err(nix::errno::Errno::EINTR) => {}
+                            Err(e) => {
+                                log::warn!("Poll error for {device_id}: {e}");
+                            }
+                        }
+                    } else {
+                        thread::sleep(self.options.poll_rate);
+                    }
                 }
 
                 Ok(())
