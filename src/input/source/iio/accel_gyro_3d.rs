@@ -1,4 +1,4 @@
-use std::{collections::HashSet, error::Error, f64::consts::PI, fmt::Debug};
+use std::{collections::HashSet, error::Error, f64::consts::PI, fmt::Debug, os::fd::RawFd};
 
 use crate::{
     config,
@@ -75,6 +75,10 @@ impl SourceInputDevice for AccelGyro3dImu {
     /// Returns the possible input events this device is capable of emitting
     fn get_capabilities(&self) -> Result<Vec<Capability>, InputError> {
         Ok(self.capabilities.clone())
+    }
+
+    fn get_poll_fds(&self) -> Vec<RawFd> {
+        self.driver.poll_fd().into_iter().collect()
     }
 
     fn update_event_filter(&mut self, events: HashSet<Capability>) -> Result<(), InputError> {
