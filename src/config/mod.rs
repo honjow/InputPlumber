@@ -401,6 +401,8 @@ pub struct IIO {
     )]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mount_matrix: Option<MountMatrix>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub use_buffer: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
