@@ -111,5 +111,7 @@ dmi:*svnZOTAC:*rnG0A1W:*
 dmi:*svnZOTAC:*rnG1A1W:*
 # IPASON
 dmi:*svnIPASON:pnG1:*
+# Terrans Force Handle 5
+dmi:*svnTerransForce:*pnHandle5:*
   USE_INPUTPLUMBER=1
 
