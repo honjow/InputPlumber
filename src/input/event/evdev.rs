@@ -614,7 +614,7 @@ fn axis_direction_from_capability(capability: Capability) -> AxisDirection {
 
 /// Returns a list of event codes responsible for handling the given input capability.
 /// This is typically used to translate a [NativeEvent] into an [EvdevEvent].
-fn event_codes_from_capability(capability: Capability) -> Vec<u16> {
+pub(crate) fn event_codes_from_capability(capability: Capability) -> Vec<u16> {
     match capability {
         Capability::None => vec![],
         Capability::NotImplemented => vec![],
