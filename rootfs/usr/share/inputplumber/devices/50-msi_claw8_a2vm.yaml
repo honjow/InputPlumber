@@ -67,7 +67,9 @@ source_devices:
       phys_path: "usb-0000:00:14.0-2/input0"
     capability_map_id: claw1-dinput
 
-  # IMU
+  # IMU — not available: Lunar Lake ISH (8086:a845) firmware loading fails
+  # on Linux. The ISH bootloader does not respond to the kernel's transfer
+  # commands. Waiting for kernel driver fix or vendor firmware support.
 
 # Optional configuration for the composite device
 options:

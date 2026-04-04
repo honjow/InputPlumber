@@ -59,22 +59,15 @@ source_devices:
       interface_num: 1
 
   # IMU
+  # NOTE: gyro_3d max sample_rate is 100 Hz (HID Sensor Hub hardware limit).
+  # Setting it below 100 causes the hub to stall on rapid raw reads.
+  # Do NOT set a custom sample_rate for gyro_3d on this device.
   - group: imu
     iio:
       name: accel_3d
-      mount_matrix:
-        # TODO: Reverify on actual hardware
-        x: [0, 1, 0]
-        y: [-1, 0, 0]
-        z: [0, 0, -1]
   - group: imu
     iio:
       name: gyro_3d
-      mount_matrix:
-        # TODO: Reverify on actual hardware
-        x: [0, 1, 0]
-        y: [-1, 0, 0]
-        z: [0, 0, -1]
 
   # Touchscreen
   #- group: touchscreen
