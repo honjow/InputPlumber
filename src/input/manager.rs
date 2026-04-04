@@ -260,6 +260,7 @@ impl Manager {
             Self::discover_all_devices(&cmd_tx_all_devices),
             Self::watch_iio_devices(self.tx.clone()),
             Self::watch_devnodes(self.tx.clone(), &mut watcher_rx),
+            Self::watch_logind_sleep(self.tx.clone()),
             self.events_loop()
         );
 
@@ -1449,6 +1450,63 @@ impl Manager {
         }
 
         Err(Box::from("No available dbus path left"))
+    }
+
+    async fn watch_logind_sleep(cmd_tx: mpsc::Sender<ManagerCommand>) {
+        use futures::StreamExt;
+        use zbus::MatchRule;
+
+        let conn = match zbus::Connection::system().await {
+            Ok(c) => c,
+            Err(e) => {
+                log::error!("Failed to connect to system D-Bus for logind signals: {e:?}");
+                return;
+            }
+        };
+
+        let rule = MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .sender("org.freedesktop.login1")
+            .expect("valid sender")
+            .interface("org.freedesktop.login1.Manager")
+            .expect("valid interface")
+            .member("PrepareForSleep")
+            .expect("valid member")
+            .build();
+
+        let mut stream = match zbus::MessageStream::for_match_rule(rule, &conn, None).await {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("Failed to subscribe to PrepareForSleep signal: {e:?}");
+                return;
+            }
+        };
+
+        log::info!("Listening for logind PrepareForSleep signals");
+        while let Some(Ok(msg)) = stream.next().await {
+            let going_to_sleep: bool = match msg.body().deserialize::<(bool,)>() {
+                Ok(a) => a.0,
+                Err(e) => {
+                    log::warn!("Failed to parse PrepareForSleep signal: {e:?}");
+                    continue;
+                }
+            };
+
+            let (sender, mut receiver) = mpsc::channel(1);
+            let cmd = if going_to_sleep {
+                log::info!("logind: system going to sleep");
+                ManagerCommand::SystemSleep { sender }
+            } else {
+                log::info!("logind: system waking up");
+                ManagerCommand::SystemWake { sender }
+            };
+
+            if let Err(e) = cmd_tx.send(cmd).await {
+                log::error!("Failed to send sleep/wake command to manager: {e:?}");
+                continue;
+            }
+            let _ = receiver.recv().await;
+        }
     }
 
     /// Watch for IIO device events
