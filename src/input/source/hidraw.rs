@@ -12,7 +12,6 @@ pub mod legos_touchpad;
 pub mod legos_xinput;
 pub mod msi_claw;
 pub mod opineo;
-pub mod oxp_hid;
 pub mod rog_ally;
 pub mod steam_deck;
 pub mod xpad_uhid;
@@ -29,7 +28,6 @@ use horipad_steam::HoripadSteam;
 use legos_imu::LegionSImuController;
 use legos_touchpad::LegionSTouchpadController;
 use msi_claw::MsiClaw;
-use oxp_hid::OxpHid;
 use rog_ally::RogAlly;
 use xpad_uhid::XpadUhid;
 use zotac_zone::ZotacZone;
@@ -71,7 +69,6 @@ enum DriverType {
     LegionGoXInput,
     MsiClaw,
     OrangePiNeo,
-    OxpHid,
     RogAlly,
     SteamDeck,
     Unknown,
@@ -96,7 +93,6 @@ pub enum HidRawDevice {
     LegionGo(SourceDriver<LegionGoController>),
     MsiClaw(SourceDriver<MsiClaw>),
     OrangePiNeo(SourceDriver<OrangePiNeoTouchpad>),
-    OxpHid(SourceDriver<OxpHid>),
     RogAlly(SourceDriver<RogAlly>),
     SteamDeck(SourceDriver<DeckController>),
     Vader4Pro(SourceDriver<Vader4Pro>),
@@ -120,7 +116,6 @@ impl SourceDeviceCompatible for HidRawDevice {
             HidRawDevice::LegionGo(source_driver) => source_driver.info_ref(),
             HidRawDevice::MsiClaw(source_driver) => source_driver.info_ref(),
             HidRawDevice::OrangePiNeo(source_driver) => source_driver.info_ref(),
-            HidRawDevice::OxpHid(source_driver) => source_driver.info_ref(),
             HidRawDevice::RogAlly(source_driver) => source_driver.info_ref(),
             HidRawDevice::SteamDeck(source_driver) => source_driver.info_ref(),
             HidRawDevice::Vader4Pro(source_driver) => source_driver.info_ref(),
@@ -144,7 +139,6 @@ impl SourceDeviceCompatible for HidRawDevice {
             HidRawDevice::LegionGo(source_driver) => source_driver.get_id(),
             HidRawDevice::MsiClaw(source_driver) => source_driver.get_id(),
             HidRawDevice::OrangePiNeo(source_driver) => source_driver.get_id(),
-            HidRawDevice::OxpHid(source_driver) => source_driver.get_id(),
             HidRawDevice::RogAlly(source_driver) => source_driver.get_id(),
             HidRawDevice::SteamDeck(source_driver) => source_driver.get_id(),
             HidRawDevice::Vader4Pro(source_driver) => source_driver.get_id(),
@@ -168,7 +162,6 @@ impl SourceDeviceCompatible for HidRawDevice {
             HidRawDevice::LegionGo(source_driver) => source_driver.client(),
             HidRawDevice::MsiClaw(source_driver) => source_driver.client(),
             HidRawDevice::OrangePiNeo(source_driver) => source_driver.client(),
-            HidRawDevice::OxpHid(source_driver) => source_driver.client(),
             HidRawDevice::RogAlly(source_driver) => source_driver.client(),
             HidRawDevice::SteamDeck(source_driver) => source_driver.client(),
             HidRawDevice::Vader4Pro(source_driver) => source_driver.client(),
@@ -192,7 +185,6 @@ impl SourceDeviceCompatible for HidRawDevice {
             HidRawDevice::LegionGo(source_driver) => source_driver.run().await,
             HidRawDevice::MsiClaw(source_driver) => source_driver.run().await,
             HidRawDevice::OrangePiNeo(source_driver) => source_driver.run().await,
-            HidRawDevice::OxpHid(source_driver) => source_driver.run().await,
             HidRawDevice::RogAlly(source_driver) => source_driver.run().await,
             HidRawDevice::SteamDeck(source_driver) => source_driver.run().await,
             HidRawDevice::Vader4Pro(source_driver) => source_driver.run().await,
@@ -216,7 +208,6 @@ impl SourceDeviceCompatible for HidRawDevice {
             HidRawDevice::LegionGo(source_driver) => source_driver.get_capabilities(),
             HidRawDevice::MsiClaw(source_driver) => source_driver.get_capabilities(),
             HidRawDevice::OrangePiNeo(source_driver) => source_driver.get_capabilities(),
-            HidRawDevice::OxpHid(source_driver) => source_driver.get_capabilities(),
             HidRawDevice::RogAlly(source_driver) => source_driver.get_capabilities(),
             HidRawDevice::SteamDeck(source_driver) => source_driver.get_capabilities(),
             HidRawDevice::Vader4Pro(source_driver) => source_driver.get_capabilities(),
@@ -250,7 +241,6 @@ impl SourceDeviceCompatible for HidRawDevice {
             HidRawDevice::LegionGo(source_driver) => source_driver.get_output_capabilities(),
             HidRawDevice::MsiClaw(source_driver) => source_driver.get_output_capabilities(),
             HidRawDevice::OrangePiNeo(source_driver) => source_driver.get_output_capabilities(),
-            HidRawDevice::OxpHid(source_driver) => source_driver.get_output_capabilities(),
             HidRawDevice::RogAlly(source_driver) => source_driver.get_output_capabilities(),
             HidRawDevice::SteamDeck(source_driver) => source_driver.get_output_capabilities(),
             HidRawDevice::Vader4Pro(source_driver) => source_driver.get_output_capabilities(),
@@ -274,7 +264,6 @@ impl SourceDeviceCompatible for HidRawDevice {
             HidRawDevice::LegionGo(source_driver) => source_driver.get_device_path(),
             HidRawDevice::MsiClaw(source_driver) => source_driver.get_device_path(),
             HidRawDevice::OrangePiNeo(source_driver) => source_driver.get_device_path(),
-            HidRawDevice::OxpHid(source_driver) => source_driver.get_device_path(),
             HidRawDevice::RogAlly(source_driver) => source_driver.get_device_path(),
             HidRawDevice::SteamDeck(source_driver) => source_driver.get_device_path(),
             HidRawDevice::Vader4Pro(source_driver) => source_driver.get_device_path(),
@@ -495,12 +484,6 @@ impl HidRawDevice {
                     SourceDriver::new(composite_device, device, device_info.into(), conf);
                 Ok(Self::GpdWinMiniMacroKeyboard(source_device))
             }
-            DriverType::OxpHid => {
-                let device = OxpHid::new(device_info.clone())?;
-                let source_device =
-                    SourceDriver::new(composite_device, device, device_info.into(), conf);
-                Ok(Self::OxpHid(source_device))
-            }
         }
     }
 
@@ -636,15 +619,6 @@ impl HidRawDevice {
         {
             log::info!("Detected ZOTAC Zone");
             return DriverType::ZotacZone;
-        }
-
-        // OXP X1 HID Controller
-        if vid == drivers::oxp_hid::driver::VID
-            && pid == drivers::oxp_hid::driver::PID
-            && iid == drivers::oxp_hid::driver::IID
-        {
-            log::info!("Detected OXP X1 HID controller");
-            return DriverType::OxpHid;
         }
 
         // GPD Win Mini
