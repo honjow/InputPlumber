@@ -128,17 +128,24 @@ impl Driver {
     }
 }
 
-/// Configure M1/M2 button remapping via sysfs (requires hid-msi-claw kernel driver)
+/// Configure M1/M2 button remapping via sysfs (requires hid-msi-claw kernel driver).
+/// Tries new attribute names first (button_m1/m2), falls back to legacy (m1/m2_remap).
 fn configure_m_remap(mut device: Device) {
-    // M1 -> KEY_INSERT, M2 -> KEY_DELETE
-    // These will be captured by InputPlumber and mapped via capability_maps
-    set_attribute(&mut device, "m1_remap", "KEY_INSERT");
-    set_attribute(&mut device, "m2_remap", "KEY_DELETE");
+    set_attribute_with_fallback(&mut device, "button_m1", "m1_remap", "KEY_INSERT");
+    set_attribute_with_fallback(&mut device, "button_m2", "m2_remap", "KEY_DELETE");
 }
 
-fn set_attribute(device: &mut Device, attribute: &str, value: &str) {
+fn set_attribute_with_fallback(
+    device: &mut Device,
+    attribute: &str,
+    fallback: &str,
+    value: &str,
+) {
     match device.set_attribute_on_tree(attribute, value) {
         Ok(_) => log::debug!("Set {attribute} to {value}"),
-        Err(e) => log::debug!("Could not set {attribute} to {value}: {e:?}"),
+        Err(_) => match device.set_attribute_on_tree(fallback, value) {
+            Ok(_) => log::debug!("Set {fallback} to {value} (legacy)"),
+            Err(e) => log::debug!("Could not set {attribute} or {fallback} to {value}: {e:?}"),
+        },
     }
 }
