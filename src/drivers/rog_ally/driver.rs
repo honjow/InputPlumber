@@ -8,7 +8,7 @@ pub const PIDS: [u16; 2] = [ALLY_PID, ALLYX_PID];
 pub const VID: u16 = 0x0b05;
 
 pub struct Driver {
-    _device: UdevDevice,
+    device: UdevDevice,
 }
 
 impl Driver {
@@ -55,7 +55,23 @@ impl Driver {
             _ => return Err(format!("Invalid interface number {if_num} provided.").into()),
         };
 
-        Ok(Self { _device: udevice })
+        Ok(Self { device: udevice })
+    }
+
+    /// Re-push the back-button remaps that the Ally MCU forgets across a
+    /// suspend/resume cycle. Intentionally avoids touching `gamepad_mode`:
+    /// writing it (even with the same value) makes the MCU re-enter gamepad
+    /// mode and clears every button remap.
+    pub fn reapply_remaps(&self) {
+        let Ok(device) = self.device.get_device() else {
+            return;
+        };
+        let if_num = device.get_attribute_from_tree("bInterfaceNumber");
+        if if_num != "02" {
+            return;
+        }
+        set_attribute(device.clone(), "btn_m1/remap", "KB_F15");
+        set_attribute(device, "btn_m2/remap", "KB_F14");
     }
 }
 
