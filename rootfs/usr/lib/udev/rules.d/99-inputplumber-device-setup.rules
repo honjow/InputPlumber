@@ -4,11 +4,11 @@ ACTION=="add|change", KERNEL=="oxp-platform", SUBSYSTEM=="platform", DRIVER=="ox
 
 # Lenovo
 # Legion Go S Controller Settings
-ACTION=="add|change", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="e31[01]", SUBSYSTEM=="hid", DRIVER=="lenovo-legos-hid", ATTR{gamepad/auto_sleep_time}="0", ATTR{gamepad/dpad_mode}="8-way", ATTR{gamepad/mode}="xinput", ATTR{gamepad/poll_rate}="250", ATTR{os_mode}="linux", ATTR{touchpad/linux_mode}="absolute", GOTO="end"
-ACTION=="add|change", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="e31[01]", SUBSYSTEM=="hid", DRIVER=="hid-lenovo-go-s", ATTR{gamepad/auto_sleep_time}="0", ATTR{gamepad/dpad_mode}="8-way", ATTR{gamepad/mode}="xinput", ATTR{gamepad/poll_rate}="250", ATTR{os_mode}="linux", ATTR{touchpad/linux_mode}="absolute", GOTO="end"
+ACTION=="add|change|bind", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="e31[01]", SUBSYSTEM=="hid", DRIVER=="lenovo-legos-hid", ATTR{gamepad/auto_sleep_time}="0", ATTR{gamepad/dpad_mode}="8-way", ATTR{gamepad/mode}="xinput", ATTR{gamepad/poll_rate}="250", ATTR{os_mode}="linux", ATTR{touchpad/linux_mode}="absolute", GOTO="end"
+ACTION=="add|change|bind", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="e31[01]", SUBSYSTEM=="hid", DRIVER=="hid-lenovo-go-s", ATTR{gamepad/auto_sleep_time}="0", ATTR{gamepad/dpad_mode}="8-way", ATTR{gamepad/mode}="xinput", ATTR{gamepad/poll_rate}="250", ATTR{os_mode}="linux", ATTR{touchpad/linux_mode}="absolute", GOTO="end"
 
 # Legion Go/Go2 Controller Settings
-ACTION=="add|change", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="61e[bcde]", SUBSYSTEM=="hid", DRIVER=="hid-lenovo-go", ATTR{os_mode}="linux", ATTR{left_handle/imu_bypass_enable}="true", ATTR{right_handle/imu_bypass_enable}="true", ATTR{touchpad/vibration_enable}="false", GOTO="end"
+ACTION=="add|change|bind", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="61e[bcde]", SUBSYSTEM=="hid", DRIVER=="hid-lenovo-go", ATTR{os_mode}="linux", ATTR{left_handle/imu_bypass_enable}="true", ATTR{right_handle/imu_bypass_enable}="true", ATTR{touchpad/vibration_enable}="false", GOTO="end"
 
 # ASUS
 # ROG Ally Controller Settings
@@ -23,6 +23,9 @@ ACTION=="add|change", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="61e[bcde]", SU
 #ACTION=="add|change", KERNEL=="0003:0B05:1B4C*", SUBSYSTEM=="hid", DRIVER=="asus_ally_hid", ATTRS{bInterfaceNumber}=="05", ATTR{qam_mode}="0", GOTO="end"
 #ACTION=="add|change", KERNEL=="0003:0B05:1B4C*", SUBSYSTEM=="hid", DRIVER=="asus_rog_ally", ATTRS{bInterfaceNumber}=="02", ATTR{btn_m1/remap}="KB_F15", ATTR{btn_m2/remap}="KB_F14", ATTR{gamepad_mode}="1", ATTR{apply_all}="1", GOTO="end"
 #ACTION=="add|change", KERNEL=="0003:0B05:1B4C*", SUBSYSTEM=="hid", DRIVER=="asus_rog_ally", ATTRS{bInterfaceNumber}=="05", ATTR{qam_mode}="0", GOTO="end"
+
+# MSI Claw Settings
+ACTION=="add|change|bind", ATTRS{idVendor}=="0db0", ATTRS{idProduct}=="190[1-3]", SUBSYSTEM=="hid", DRIVER=="hid-msi-claw", ATTR{button_m1}="KEY_RIGHTBRACE", ATTR{button_m2}="KEY_LEFTBRACE", ATTR{mkeys_function}="macro" GOTO="end"
 
 LABEL="end"
 
