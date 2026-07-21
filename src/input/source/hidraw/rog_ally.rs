@@ -12,7 +12,7 @@ use crate::{
 
 /// XpadUhid source device implementation
 pub struct RogAlly {
-    _driver: Driver,
+    driver: Driver,
 }
 
 impl RogAlly {
@@ -20,7 +20,7 @@ impl RogAlly {
     /// device information
     pub fn new(device_info: UdevDevice) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let driver = Driver::new(device_info)?;
-        Ok(Self { _driver: driver })
+        Ok(Self { driver })
     }
 }
 
@@ -36,6 +36,11 @@ impl SourceInputDevice for RogAlly {
 
     fn get_capabilities(&self) -> Result<Vec<Capability>, InputError> {
         Ok(vec![])
+    }
+
+    fn on_resume(&mut self) {
+        log::info!("Reapplying ROG Ally back button remaps after resume");
+        self.driver.reapply_remaps();
     }
 }
 
