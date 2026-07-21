@@ -203,4 +203,9 @@ impl ScheduledNativeEvent {
     pub fn as_capability(&self) -> Capability {
         self.event.capability.clone()
     }
+
+    /// Returns a reference to the underlying event
+    pub fn event(&self) -> &NativeEvent {
+        &self.event
+    }
 }
