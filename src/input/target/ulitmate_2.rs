@@ -14,15 +14,16 @@ use crate::{
     drivers::ultimate_2::{
         hid_report::{DPadDirection, PackedInputDataReport, PackedRumbleOutputReport},
         report_descriptor::REPORT_DESCRIPTOR,
-        ACCEL_SCALE, JOY_AXIS_MAX, PID, REPORT_ID_RUMBLE, TRIGGER_AXIS_MAX, VID,
+        ACCEL_SCALE, JOY_AXIS_MAX, JOY_AXIS_MIN, PID, REPORT_ID_RUMBLE, TRIGGER_AXIS_MAX,
+        VID,
     },
     input::{
         capability::{Capability, Gamepad, GamepadAxis, GamepadButton, GamepadTrigger},
         composite_device::client::CompositeDeviceClient,
         event::{
             native::{NativeEvent, ScheduledNativeEvent},
-            value::denormalize_unsigned_value_u8,
             value::InputValue,
+            value::{denormalize_signed_value_u8, denormalize_unsigned_value_u8},
         },
         output_capability::OutputCapability,
         output_event::OutputEvent,
@@ -85,10 +86,10 @@ impl Ultimate2WirelessDevice {
                     GamepadButton::RightBumper => self.state.button_r1 = event.pressed(),
                     GamepadButton::LeftStick => self.state.button_l2 = event.pressed(),
                     GamepadButton::RightStick => self.state.button_r2 = event.pressed(),
-                    GamepadButton::LeftPaddle1 => self.state.button_l3 = event.pressed(),
-                    GamepadButton::RightPaddle1 => self.state.button_r3 = event.pressed(),
-                    GamepadButton::LeftPaddle2 => self.state.button_l4 = event.pressed(),
-                    GamepadButton::RightPaddle2 => self.state.button_r4 = event.pressed(),
+                    GamepadButton::LeftPaddle1 => self.state.button_l4 = event.pressed(),
+                    GamepadButton::RightPaddle1 => self.state.button_r4 = event.pressed(),
+                    GamepadButton::LeftPaddle2 => self.state.button_l3 = event.pressed(),
+                    GamepadButton::RightPaddle2 => self.state.button_r3 = event.pressed(),
                     GamepadButton::DPadUp => {
                         self.state.set_dpad(DPadDirection::Up, event.pressed())
                     }
@@ -101,6 +102,12 @@ impl Ultimate2WirelessDevice {
                     GamepadButton::DPadRight => {
                         self.state.set_dpad(DPadDirection::Right, event.pressed())
                     }
+                    GamepadButton::LeftTrigger => {
+                        self.state.trigger_l = if event.pressed() { 0xff } else { 0x00 }
+                    }
+                    GamepadButton::RightTrigger => {
+                        self.state.trigger_r = if event.pressed() { 0xff } else { 0x00 }
+                    }
                     _ => (),
                 },
 
@@ -108,24 +115,36 @@ impl Ultimate2WirelessDevice {
                     GamepadAxis::LeftStick => {
                         if let InputValue::Vector2 { x, y } = value {
                             if let Some(x) = x {
-                                self.state.joystick_l_x =
-                                    denormalize_unsigned_value_u8(x, JOY_AXIS_MAX);
+                                self.state.joystick_l_x = denormalize_signed_value_u8(
+                                    x,
+                                    JOY_AXIS_MIN,
+                                    JOY_AXIS_MAX,
+                                );
                             }
                             if let Some(y) = y {
-                                self.state.joystick_l_y =
-                                    denormalize_unsigned_value_u8(y, JOY_AXIS_MAX);
+                                self.state.joystick_l_y = denormalize_signed_value_u8(
+                                    y,
+                                    JOY_AXIS_MIN,
+                                    JOY_AXIS_MAX,
+                                );
                             }
                         }
                     }
                     GamepadAxis::RightStick => {
                         if let InputValue::Vector2 { x, y } = value {
                             if let Some(x) = x {
-                                self.state.joystick_r_x =
-                                    denormalize_unsigned_value_u8(x, JOY_AXIS_MAX);
+                                self.state.joystick_r_x = denormalize_signed_value_u8(
+                                    x,
+                                    JOY_AXIS_MIN,
+                                    JOY_AXIS_MAX,
+                                );
                             }
                             if let Some(y) = y {
-                                self.state.joystick_r_y =
-                                    denormalize_unsigned_value_u8(y, JOY_AXIS_MAX);
+                                self.state.joystick_r_y = denormalize_signed_value_u8(
+                                    y,
+                                    JOY_AXIS_MIN,
+                                    JOY_AXIS_MAX,
+                                );
                             }
                         }
                     }
