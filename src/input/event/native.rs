@@ -186,6 +186,7 @@ impl ScheduledNativeEvent {
 
     /// Create a new scheduled event with the given timestamp and wait time before
     /// being emitted
+    #[allow(unused)]
     pub fn new_with_time(event: NativeEvent, timestamp: Instant, wait_time: Duration) -> Self {
         Self {
             event,
@@ -200,12 +201,8 @@ impl ScheduledNativeEvent {
     }
 
     /// Returns the capability that the scheduled event implements
+    #[allow(unused)]
     pub fn as_capability(&self) -> Capability {
         self.event.capability.clone()
-    }
-
-    /// Returns a reference to the underlying event
-    pub fn event(&self) -> &NativeEvent {
-        &self.event
     }
 }

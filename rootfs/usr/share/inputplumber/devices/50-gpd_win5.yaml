@@ -74,6 +74,8 @@ options:
   # this is false, InputPlumber will not try to manage the device unless an
   # external service enables management of the device. Defaults to 'false'
   auto_manage: true
+  # Old firmware can omit KEY_DELETE release; do not time out other held keys.
+  translatable_stale_keys: [KeyDelete]
 
 # The target input device(s) to emulate by default
 target_devices:

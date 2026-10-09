@@ -1,0 +1,366 @@
+[
+  {
+    "source_commit": "2d93ca63c7e4fa3c4bcc2cae136c731d9f78bd3c",
+    "subject": "feat(Hardware Support): add ipason g1",
+    "feature_branch": "rebuild/v0.81-devices",
+    "disposition": "rebuild preserving upstream driver architecture",
+    "result_commits": [
+      "04e98b6bd816b0510bb70044d0153e39085425ae",
+      "e6986b74d581738843c97d05bc99d029613b6527",
+      "17dcf44686e0434c3089216d82c217b9e4694752"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "316b4be9e4a169f837257a4ebbe4772b9177515b",
+    "subject": "feat(Hardware Support): add IPASON G1 device support",
+    "feature_branch": "rebuild/v0.81-devices",
+    "disposition": "rebuild preserving upstream driver architecture",
+    "result_commits": [
+      "04e98b6bd816b0510bb70044d0153e39085425ae",
+      "e6986b74d581738843c97d05bc99d029613b6527",
+      "17dcf44686e0434c3089216d82c217b9e4694752"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "e7abd648a02a9f885634f332c41667deee5d2d32",
+    "subject": "feat(Hardware Support): map IPASON G1 homepage key to QuickAccess",
+    "feature_branch": "rebuild/v0.81-devices",
+    "disposition": "rebuild preserving upstream driver architecture",
+    "result_commits": [
+      "04e98b6bd816b0510bb70044d0153e39085425ae",
+      "e6986b74d581738843c97d05bc99d029613b6527",
+      "17dcf44686e0434c3089216d82c217b9e4694752"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "4dc375d64968a85e6767105259afd8e56b8abdac",
+    "subject": "fix(Driver): invert axis calculations for IMU inputs",
+    "feature_branch": "rebuild/v0.81-devices",
+    "disposition": "rebuild preserving upstream driver architecture",
+    "result_commits": [
+      "04e98b6bd816b0510bb70044d0153e39085425ae",
+      "e6986b74d581738843c97d05bc99d029613b6527",
+      "17dcf44686e0434c3089216d82c217b9e4694752"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "e42cb14fb7c11e5e3eae78591ca18ddcac27cfd8",
+    "subject": "fix: harden win5 mapping against missing key releases",
+    "feature_branch": "rebuild/v0.81-devices",
+    "disposition": "rebuild preserving upstream driver architecture",
+    "result_commits": [
+      "04e98b6bd816b0510bb70044d0153e39085425ae",
+      "e6986b74d581738843c97d05bc99d029613b6527",
+      "17dcf44686e0434c3089216d82c217b9e4694752"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "83a9bdf6b54241e4a5377f329cc50a617e9afcf2",
+    "subject": "fix: reliably restore hidden input nodes on shutdown",
+    "feature_branch": "rebuild/v0.81-permissions",
+    "disposition": "adapt best-effort purpose to upstream tracked-node restoration; no broad chmod fallback",
+    "result_commits": [
+      "9fa3ae24f00fab28dc4dd9f857094e2a9bffe94e",
+      "03329d0b9e2b086345811306d30a0d861ffb1bf6",
+      "dafa255c2ac7df871b3496cb6971c6b12399ab2f"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "3798e45afc13133c7cf93f2b545e804eb9309efb",
+    "subject": "feat: add required_keys matching for evdev source devices",
+    "feature_branch": "rebuild/v0.81-devices",
+    "disposition": "rebuild preserving upstream driver architecture",
+    "result_commits": [
+      "04e98b6bd816b0510bb70044d0153e39085425ae",
+      "e6986b74d581738843c97d05bc99d029613b6527",
+      "17dcf44686e0434c3089216d82c217b9e4694752"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "6ec1d28578a07b0ed70f70c002b986daefc4e744",
+    "subject": "feat(Hardware Support): add capability map ID for IPASON G1 device",
+    "feature_branch": "rebuild/v0.81-devices",
+    "disposition": "rebuild preserving upstream driver architecture",
+    "result_commits": [
+      "04e98b6bd816b0510bb70044d0153e39085425ae",
+      "e6986b74d581738843c97d05bc99d029613b6527",
+      "17dcf44686e0434c3089216d82c217b9e4694752"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "283c856037ec42ce98fd80e74a1fc10c0a620394",
+    "subject": "feat(CapabilityMap): add generic hidraw button driver",
+    "feature_branch": "rebuild/v0.81-devices",
+    "disposition": "rebuild preserving upstream driver architecture",
+    "result_commits": [
+      "04e98b6bd816b0510bb70044d0153e39085425ae",
+      "e6986b74d581738843c97d05bc99d029613b6527",
+      "17dcf44686e0434c3089216d82c217b9e4694752"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "070fb2b77f75c84eb118b93e1d0b1b76fa0e6625",
+    "subject": "feat(Hardware Support): add GPD Win 5 HID button support for new firmware",
+    "feature_branch": "rebuild/v0.81-devices",
+    "disposition": "rebuild preserving upstream driver architecture",
+    "result_commits": [
+      "04e98b6bd816b0510bb70044d0153e39085425ae",
+      "e6986b74d581738843c97d05bc99d029613b6527",
+      "17dcf44686e0434c3089216d82c217b9e4694752"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "2c7c74c9b9f50f4b8cad89478d71b64fe5679245",
+    "subject": "refactor(hidraw): simplify generic button driver and translator API",
+    "feature_branch": "rebuild/v0.81-devices",
+    "disposition": "rebuild preserving upstream driver architecture",
+    "result_commits": [
+      "04e98b6bd816b0510bb70044d0153e39085425ae",
+      "e6986b74d581738843c97d05bc99d029613b6527",
+      "17dcf44686e0434c3089216d82c217b9e4694752"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "c61c846eae63709d383ebe1d3cc9d7eef32cba3b",
+    "subject": "feat(Hardware Support): rename GPD Win 5 HID capability map and update schema",
+    "feature_branch": "rebuild/v0.81-devices",
+    "disposition": "rebuild preserving upstream driver architecture",
+    "result_commits": [
+      "04e98b6bd816b0510bb70044d0153e39085425ae",
+      "e6986b74d581738843c97d05bc99d029613b6527",
+      "17dcf44686e0434c3089216d82c217b9e4694752"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "8692d6637ee81ef58ed624da8ea2521eb84b4042",
+    "subject": "feat(Hardware Support): add Terrans Force Handle 5",
+    "feature_branch": "rebuild/v0.81-devices",
+    "disposition": "rebuild preserving upstream driver architecture",
+    "result_commits": [
+      "04e98b6bd816b0510bb70044d0153e39085425ae",
+      "e6986b74d581738843c97d05bc99d029613b6527",
+      "17dcf44686e0434c3089216d82c217b9e4694752"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "d24bb00f1b2dad0bccf1467f6e2d98c442fe10ef",
+    "subject": "feat(Hardware Support): add autostart for Terrans Force Handle 5",
+    "feature_branch": "rebuild/v0.81-devices",
+    "disposition": "rebuild preserving upstream driver architecture",
+    "result_commits": [
+      "04e98b6bd816b0510bb70044d0153e39085425ae",
+      "e6986b74d581738843c97d05bc99d029613b6527",
+      "17dcf44686e0434c3089216d82c217b9e4694752"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "326f802a36fb49e2fe5cf1fdfac148017ce1c8e7",
+    "subject": "feat(Capability): add Touchscreen capability and gesture types",
+    "feature_branch": "rebuild/v0.81-gestures",
+    "disposition": "rebuild; replace global delay with scoped gesture pulse compatibility",
+    "result_commits": [
+      "64a8c4e36effd17825f1eecb020c3ed6221e0026",
+      "d0859b7217a553109c72dc629792a1892972f8a3",
+      "5494de7264773d2b2a6d20af509347a12b169d7d"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "1ee9d54548263b5a3a48e2bc1f4b4961c987d6f4",
+    "subject": "feat(Touchscreen): add edge-swipe gesture detection with grab and tap replay",
+    "feature_branch": "rebuild/v0.81-gestures",
+    "disposition": "rebuild; replace global delay with scoped gesture pulse compatibility",
+    "result_commits": [
+      "64a8c4e36effd17825f1eecb020c3ed6221e0026",
+      "d0859b7217a553109c72dc629792a1892972f8a3",
+      "5494de7264773d2b2a6d20af509347a12b169d7d"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "1253136cdc0fab3bb9e7a446bd2dcad2ec79b0a2",
+    "subject": "feat(CompositeDevice): route touchscreen gesture events through profile mapping",
+    "feature_branch": "rebuild/v0.81-gestures",
+    "disposition": "rebuild; replace global delay with scoped gesture pulse compatibility",
+    "result_commits": [
+      "64a8c4e36effd17825f1eecb020c3ed6221e0026",
+      "d0859b7217a553109c72dc629792a1892972f8a3",
+      "5494de7264773d2b2a6d20af509347a12b169d7d"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "962889663bf515a24005d01bf418661dc63b42fe",
+    "subject": "feat(Profile): add default gesture mappings and update schemas",
+    "feature_branch": "rebuild/v0.81-gestures",
+    "disposition": "rebuild; replace global delay with scoped gesture pulse compatibility",
+    "result_commits": [
+      "64a8c4e36effd17825f1eecb020c3ed6221e0026",
+      "d0859b7217a553109c72dc629792a1892972f8a3",
+      "5494de7264773d2b2a6d20af509347a12b169d7d"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "bfbdee7723d7efe6e83bb2eee93e6b3481e19389",
+    "subject": "refactor(Target): move MIN_FRAME_TIME enforcement to TargetDriver",
+    "feature_branch": "rebuild/v0.81-gestures",
+    "disposition": "rebuild; replace global delay with scoped gesture pulse compatibility",
+    "result_commits": [
+      "64a8c4e36effd17825f1eecb020c3ed6221e0026",
+      "d0859b7217a553109c72dc629792a1892972f8a3",
+      "5494de7264773d2b2a6d20af509347a12b169d7d"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "ae60f0f0ce6d00338815ae7a0bf7610a74d70a16",
+    "subject": "feat(Hardware): enable touchscreen gesture support for GPD Win5 and ONEXPLAYER X1",
+    "feature_branch": "rebuild/v0.81-gestures",
+    "disposition": "rebuild; replace global delay with scoped gesture pulse compatibility",
+    "result_commits": [
+      "64a8c4e36effd17825f1eecb020c3ed6221e0026",
+      "d0859b7217a553109c72dc629792a1892972f8a3",
+      "5494de7264773d2b2a6d20af509347a12b169d7d"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "df022cd2ea4ff6ab0914a9fd6d2a19c997546dcd",
+    "subject": "fix(Touchscreen): fix clippy warnings in gesture detection and value translation",
+    "feature_branch": "rebuild/v0.81-gestures",
+    "disposition": "rebuild; replace global delay with scoped gesture pulse compatibility",
+    "result_commits": [
+      "64a8c4e36effd17825f1eecb020c3ed6221e0026",
+      "d0859b7217a553109c72dc629792a1892972f8a3",
+      "5494de7264773d2b2a6d20af509347a12b169d7d"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "dc23705260091c4d87452d67d496409ecb297f6b",
+    "subject": "fix(Capability): remove redundant Swipe prefix from GestureType variants",
+    "feature_branch": "rebuild/v0.81-gestures",
+    "disposition": "rebuild; replace global delay with scoped gesture pulse compatibility",
+    "result_commits": [
+      "64a8c4e36effd17825f1eecb020c3ed6221e0026",
+      "d0859b7217a553109c72dc629792a1892972f8a3",
+      "5494de7264773d2b2a6d20af509347a12b169d7d"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "c18804879fd898b77c626deeb885ae531a3a7eab",
+    "subject": "feat(source): add suspend/resume lifecycle for source devices",
+    "feature_branch": "rebuild/v0.81-source-iio",
+    "disposition": "rebuild with upstream source polling and lifecycle compatibility",
+    "result_commits": [
+      "b49dc191e22fa6b48cfa253eb2051bbf21200613",
+      "e6784d0443e298a93a861220e7be943c574d1317"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "2aa9e150dced9bfb5673ca40a56b15ff7c637a32",
+    "subject": "fix(iio): tear down and recreate IIO driver across suspend/resume",
+    "feature_branch": "rebuild/v0.81-source-iio",
+    "disposition": "rebuild with upstream source polling and lifecycle compatibility",
+    "result_commits": [
+      "b49dc191e22fa6b48cfa253eb2051bbf21200613",
+      "e6784d0443e298a93a861220e7be943c574d1317"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "91b2f016600109f86a2782335fb84e36f6b98f5e",
+    "subject": "feat(msi-claw): add IMU support to MSI Claw device configurations",
+    "feature_branch": "rebuild/v0.81-source-iio",
+    "disposition": "rebuild with upstream source polling and lifecycle compatibility",
+    "result_commits": [
+      "b49dc191e22fa6b48cfa253eb2051bbf21200613",
+      "e6784d0443e298a93a861220e7be943c574d1317"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "c3dfbf4112d473c965a869190239740a9373f6d8",
+    "subject": "feat(iio): add IIO buffer mode with trigger support",
+    "feature_branch": "rebuild/v0.81-source-iio",
+    "disposition": "rebuild with upstream source polling and lifecycle compatibility",
+    "result_commits": [
+      "b49dc191e22fa6b48cfa253eb2051bbf21200613",
+      "e6784d0443e298a93a861220e7be943c574d1317"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "aef513a7ec48cb6787ec7b87a99db622463bb690",
+    "subject": "feat(source): add fd-driven polling for source devices",
+    "feature_branch": "rebuild/v0.81-source-iio",
+    "disposition": "rebuild with upstream source polling and lifecycle compatibility",
+    "result_commits": [
+      "b49dc191e22fa6b48cfa253eb2051bbf21200613",
+      "e6784d0443e298a93a861220e7be943c574d1317"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "406b4cd67f699a243de48f26352143b492b19e52",
+    "subject": "feat(iio): enable buffer mode and poll fds for IIO source devices",
+    "feature_branch": "rebuild/v0.81-source-iio",
+    "disposition": "rebuild with upstream source polling and lifecycle compatibility",
+    "result_commits": [
+      "b49dc191e22fa6b48cfa253eb2051bbf21200613",
+      "e6784d0443e298a93a861220e7be943c574d1317"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "e8cb0a6d90101240a32d3a7b02ac2f47d01ab9b6",
+    "subject": "fix(msi-claw-a8): disable buffer mode for AMD SFH devices",
+    "feature_branch": "rebuild/v0.81-source-iio",
+    "disposition": "rebuild with upstream source polling and lifecycle compatibility",
+    "result_commits": [
+      "b49dc191e22fa6b48cfa253eb2051bbf21200613",
+      "e6784d0443e298a93a861220e7be943c574d1317"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "37a20780f195458816908b3672173625cf3f2e94",
+    "subject": "fix(ROG Ally): reapply back button remaps after resume",
+    "feature_branch": "rebuild/v0.81-source-iio",
+    "disposition": "rebuild with upstream source polling and lifecycle compatibility",
+    "result_commits": [
+      "b49dc191e22fa6b48cfa253eb2051bbf21200613",
+      "e6784d0443e298a93a861220e7be943c574d1317"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  },
+  {
+    "source_commit": "a3e24f7becca4461c1114eb36cbcbf98cb283525",
+    "subject": "fix(8bitdo-u2): restore working target report encoding",
+    "feature_branch": "rebuild/v0.81-devices",
+    "disposition": "rebuild preserving upstream driver architecture",
+    "result_commits": [
+      "04e98b6bd816b0510bb70044d0153e39085425ae",
+      "e6986b74d581738843c97d05bc99d029613b6527",
+      "17dcf44686e0434c3089216d82c217b9e4694752"
+    ],
+    "validation": "Integrated candidate tests; exact final SHA, command exits and logs are included in delivery validation evidence."
+  }
+]

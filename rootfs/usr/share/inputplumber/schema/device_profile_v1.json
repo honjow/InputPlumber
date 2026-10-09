@@ -382,7 +382,7 @@
         },
         "gesture": {
           "type": "string",
-          "description": "Edge-swipe gesture type. Left/right swipes support an optional area suffix (:Top, :Bottom, :Any).",
+          "description": "Edge-swipe gesture type. Left/right swipes require an area suffix (:Top, :Bottom, :Any).",
           "examples": [
             "SwipeRight:Top",
             "SwipeRight:Bottom",

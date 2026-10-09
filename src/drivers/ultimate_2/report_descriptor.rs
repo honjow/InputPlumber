@@ -11,28 +11,25 @@
 //   Report ID 0x05 - Output ( 4 bytes payload =  5 bytes total, rumble command)
 
 pub const REPORT_DESCRIPTOR: [u8; 40] = [
-    0x05, 0x01,        // Usage Page (Generic Desktop)
-    0x09, 0x05,        // Usage (Game Pad)
-    0xa1, 0x01,        // Collection (Application)
-
+    0x05, 0x01, // Usage Page (Generic Desktop)
+    0x09, 0x05, // Usage (Game Pad)
+    0xa1, 0x01, // Collection (Application)
     // Input report: ID=0x04, 33 bytes via Vendor Defined usage
-    0x85, 0x04,        //   Report ID (4)
-    0x06, 0x00, 0xff,  //   Usage Page (Vendor Defined 0xFF00)
-    0x09, 0x20,        //   Usage (Vendor Usage 0x20)
-    0x15, 0x00,        //   Logical Minimum (0)
-    0x26, 0xff, 0x00,  //   Logical Maximum (255)
-    0x75, 0x08,        //   Report Size (8 bits)
-    0x95, 0x21,        //   Report Count (33)  → 33 bytes
-    0x81, 0x02,        //   Input (Data, Variable, Absolute)
-
+    0x85, 0x04, //   Report ID (4)
+    0x06, 0x00, 0xff, //   Usage Page (Vendor Defined 0xFF00)
+    0x09, 0x20, //   Usage (Vendor Usage 0x20)
+    0x15, 0x00, //   Logical Minimum (0)
+    0x26, 0xff, 0x00, //   Logical Maximum (255)
+    0x75, 0x08, //   Report Size (8 bits)
+    0x95, 0x21, //   Report Count (33)  → 33 bytes
+    0x81, 0x02, //   Input (Data, Variable, Absolute)
     // Output report: ID=0x05, 4 bytes (rumble: [low_freq, high_freq, 0x00, 0x00])
-    0x85, 0x05,        //   Report ID (5)
-    0x09, 0x21,        //   Usage (Vendor Usage 0x21)
-    0x15, 0x00,        //   Logical Minimum (0)
-    0x26, 0xff, 0x00,  //   Logical Maximum (255)
-    0x75, 0x08,        //   Report Size (8 bits)
-    0x95, 0x04,        //   Report Count (4)   → 4 bytes
-    0x91, 0x02,        //   Output (Data, Variable, Absolute)
-
-    0xc0,              // End Collection
+    0x85, 0x05, //   Report ID (5)
+    0x09, 0x21, //   Usage (Vendor Usage 0x21)
+    0x15, 0x00, //   Logical Minimum (0)
+    0x26, 0xff, 0x00, //   Logical Maximum (255)
+    0x75, 0x08, //   Report Size (8 bits)
+    0x95, 0x04, //   Report Count (4)   → 4 bytes
+    0x91, 0x02, //   Output (Data, Variable, Absolute)
+    0xc0, // End Collection
 ];

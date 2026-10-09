@@ -188,6 +188,10 @@ pub struct CompositeDeviceConfigOptions {
     pub auto_manage: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub persist: Option<bool>,
+    /// Opt-in keyboard capabilities whose missing release should be recovered
+    /// after 350ms without a press/repeat. Leave unset for ordinary held keys.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub translatable_stale_keys: Option<Vec<String>>,
 }
 
 /// Defines a platform match for loading a [CompositeDeviceConfig]
@@ -222,6 +226,8 @@ pub struct DMIMatch {
     pub product_sku: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sys_vendor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_vendor: Option<String>,
 }
@@ -918,9 +924,7 @@ impl CompositeDeviceConfig {
                     return false;
                 };
                 if !sysfs_key_bitmap_has_bit(&syspath, code) {
-                    log::trace!(
-                        "Device {syspath} missing required key {key_name} (code {code})"
-                    );
+                    log::trace!("Device {syspath} missing required key {key_name} (code {code})");
                     return false;
                 }
             }
@@ -1091,6 +1095,15 @@ impl CompositeDeviceConfig {
                     }
                     has_matches = true;
                 }
+                if let Some(cpu_model) = dmi_config.cpu_model {
+                    if !glob_match(
+                        cpu_model.as_str(),
+                        cpu_info.model_name(0).unwrap_or_default(),
+                    ) {
+                        continue;
+                    }
+                    has_matches = true;
+                }
 
                 if let Some(bios_release) = dmi_config.bios_release {
                     if !glob_match(bios_release.as_str(), data.bios_release.as_str()) {
@@ -1185,7 +1198,11 @@ fn sysfs_key_bitmap_has_bit(syspath: &str, key_code: u16) -> bool {
         return false;
     };
 
-    let bits_per_word = std::mem::size_of::<usize>() * 8;
+    key_bitmap_has_bit(&content, key_code)
+}
+
+fn key_bitmap_has_bit(content: &str, key_code: u16) -> bool {
+    let bits_per_word = usize::BITS as usize;
     let word_index = key_code as usize / bits_per_word;
     let bit_index = key_code as usize % bits_per_word;
 

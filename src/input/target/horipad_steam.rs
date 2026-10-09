@@ -6,9 +6,9 @@ use uhid_virt::{Bus, CreateParams, StreamError, UHIDDevice};
 
 use crate::{
     drivers::horipad_steam::{
-        driver::{JOY_AXIS_MAX, JOY_AXIS_MIN, PIDS, TRIGGER_AXIS_MAX, VID},
         hid_report::{Direction, PackedInputDataReport},
         report_descriptor::REPORT_DESCRIPTOR,
+        JOY_AXIS_MAX, JOY_AXIS_MIN, PIDS, TRIGGER_AXIS_MAX, VID,
     },
     input::{
         capability::{Capability, Gamepad, GamepadAxis, GamepadButton, GamepadTrigger},
@@ -24,6 +24,10 @@ use crate::{
 };
 
 use super::{InputError, OutputError, TargetInputDevice, TargetOutputDevice};
+
+// The minimum interval between button events must wait between
+// each other for chords.
+const MIN_CHORD_TIME: Duration = Duration::from_millis(80);
 
 /// The [HoripadSteamDevice] is a target input device implementation that emulates
 /// a Horipad Steam Controller using uhid.
@@ -122,27 +126,24 @@ impl HoripadSteamDevice {
                             event.get_value(),
                         );
                         // triggers at 128 exactly
-                        let trigv = if pressed { 0.5 } else { 0.0 };
-                        let trigr = NativeEvent::new(
+                        let trigger_value = if pressed { 0.5 } else { 0.0 };
+                        let trigger = NativeEvent::new(
                             Capability::Gamepad(Gamepad::Trigger(GamepadTrigger::RightTrigger)),
-                            InputValue::Float(trigv),
+                            InputValue::Float(trigger_value),
                         );
 
-                        let (guide, trigr) = if pressed {
+                        let (guide, trigger) = if pressed {
                             let guide = ScheduledNativeEvent::new(guide, Duration::from_millis(0));
-                            let trigr =
-                                ScheduledNativeEvent::new(trigr, Duration::from_millis(160));
-                            (guide, trigr)
+                            let trigger = ScheduledNativeEvent::new(trigger, MIN_CHORD_TIME);
+                            (guide, trigger)
                         } else {
-                            let guide =
-                                ScheduledNativeEvent::new(guide, Duration::from_millis(240));
-                            let trigr =
-                                ScheduledNativeEvent::new(trigr, Duration::from_millis(160));
-                            (guide, trigr)
+                            let guide = ScheduledNativeEvent::new(guide, MIN_CHORD_TIME * 3);
+                            let trigger = ScheduledNativeEvent::new(trigger, MIN_CHORD_TIME * 2);
+                            (guide, trigger)
                         };
 
                         self.queued_events.push(guide);
-                        self.queued_events.push(trigr);
+                        self.queued_events.push(trigger);
                     }
                     _ => (),
                 },

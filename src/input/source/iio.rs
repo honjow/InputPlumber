@@ -116,7 +116,10 @@ impl IioDevice {
         let name = device_name.as_str();
         log::debug!("Finding driver for IIO interface: {name}");
         // BMI_IMU (Bosch BMI160/260/323 and InvenSense ICM42xxx)
-        if glob_match("{i2c-10EC5280*,i2c-BOSC*,i2c-BMI*,bmi*-imu,bmi260,icm4*}", name) {
+        if glob_match(
+            "{i2c-10EC5280*,i2c-BOSC*,i2c-BMI*,bmi*-imu,bmi260,icm4*}",
+            name,
+        ) {
             log::info!("Detected IMU: {name}");
             return DriverType::BmiImu;
         }

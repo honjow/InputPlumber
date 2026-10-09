@@ -1,60 +1,53 @@
 use core::panic;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::error::Error;
-use std::path::PathBuf;
-use std::time::Duration;
+use std::{
+    collections::{HashMap, HashSet},
+    error::Error,
+    path::PathBuf,
+    time::Duration,
+};
 
 use ::procfs::CpuInfo;
 use ::udev::MonitorBuilder;
 use mio::{Events, Interest, Poll, Token};
 use thiserror::Error;
-use tokio::sync::mpsc;
-use tokio::task;
-use tokio::task::JoinHandle;
-use zbus::fdo::ManagedObjects;
-use zbus::zvariant::ObjectPath;
-use zbus::Connection;
-
-use crate::bluetooth::device1::Device1Proxy;
-use crate::config::capability_map::load_capability_mappings;
-use crate::config::path::get_devices_paths;
-use crate::config::path::get_multidir_sorted_files;
-use crate::config::CompositeDeviceConfig;
-use crate::config::SourceDevice;
-use crate::constants::BUS_PREFIX;
-use crate::constants::BUS_SOURCES_PREFIX;
-use crate::constants::BUS_TARGETS_PREFIX;
-use crate::dbus::interface::manager::ManagerInterface;
-use crate::dbus::interface::source::evdev::SourceEventDeviceInterface;
-use crate::dbus::interface::source::hidraw::SourceHIDRawInterface;
-use crate::dbus::interface::source::iio_imu::SourceIioImuInterface;
-use crate::dbus::interface::source::led::SourceLedInterface;
-use crate::dbus::interface::source::tty::SourceTtyInterface;
-use crate::dbus::interface::source::udev::SourceUdevDeviceInterface;
-use crate::dbus::interface::DBusInterfaceManager;
-use crate::dmi::data::DMIData;
-use crate::dmi::get_cpu_info;
-use crate::dmi::get_dmi_data;
-use crate::input::composite_device::CompositeDevice;
-use crate::input::source::evdev;
-use crate::input::source::hidraw;
-use crate::input::source::iio;
-use crate::input::source::led;
-use crate::input::source::tty;
-use crate::input::target::TargetDevice;
-use crate::input::target::TargetDeviceTypeId;
-use crate::udev;
-use crate::udev::device::AttributeGetter;
-use crate::udev::device::UdevDevice;
+use tokio::{
+    sync::mpsc,
+    task::{self, JoinHandle},
+};
+use zbus::{fdo::ManagedObjects, zvariant::ObjectPath, Connection};
 
 use super::composite_device::client::CompositeDeviceClient;
 use super::info::DeviceInfo;
-use super::target::client::TargetDeviceClient;
-use super::target::TargetDeviceClass;
-
-use crate::watcher;
-use crate::watcher::WatchEvent;
+use super::target::{client::TargetDeviceClient, TargetDeviceClass};
+use crate::bluetooth::device1::Device1Proxy;
+use crate::config::{
+    capability_map::load_capability_mappings,
+    path::{get_devices_paths, get_multidir_sorted_files},
+    CompositeDeviceConfig, SourceDevice,
+};
+use crate::dbus::interface::{
+    source::{
+        evdev::SourceEventDeviceInterface, hidraw::SourceHIDRawInterface,
+        iio_imu::SourceIioImuInterface, led::SourceLedInterface, tty::SourceTtyInterface,
+        udev::SourceUdevDeviceInterface,
+    },
+    DBusInterfaceManager,
+};
+use crate::dmi::{data::DMIData, get_cpu_info};
+use crate::input::{
+    source::{evdev, hidraw, iio, led, tty},
+    target::{TargetDevice, TargetDeviceTypeId},
+};
+use crate::udev::{
+    self,
+    device::{AttributeGetter, UdevDevice},
+};
+use crate::watcher::{self, WatchEvent};
+use crate::{
+    constants::{BUS_PREFIX, BUS_SOURCES_PREFIX, BUS_TARGETS_PREFIX},
+    dbus::interface::manager::ManagerInterface,
+};
+use crate::{dmi::get_dmi_data, input::composite_device::CompositeDevice};
 
 const DEV_PATH: &str = "/dev";
 const INPUT_PATH: &str = "/dev/input";
@@ -403,6 +396,14 @@ impl Manager {
                     });
                 }
                 ManagerCommand::RemoveFromGamepadOrder { device_path } => {
+                    // A gamepad target may have been re-attached while this
+                    // request was in flight (e.g. during a profile switch).
+                    // If so, the device should keep its place in the order.
+                    if self.has_gamepad_target_attached(&device_path).await {
+                        log::debug!("Device {device_path} still has a gamepad target attached, skipping removal from gamepad order");
+                        continue;
+                    }
+
                     let new_order = self
                         .target_gamepad_order
                         .drain(..)
@@ -754,6 +755,29 @@ impl Manager {
         log::debug!("Finished handling attach request for: {target_path}");
 
         Ok(())
+    }
+
+    /// Returns true if the given composite device currently has at least one
+    /// gamepad target device attached.
+    async fn has_gamepad_target_attached(&self, composite_path: &str) -> bool {
+        let Some(target_paths) = self.composite_device_targets.get(composite_path) else {
+            return false;
+        };
+        for target_path in target_paths {
+            let Some(target) = self.target_devices.get(target_path) else {
+                continue;
+            };
+            let Ok(kind) = target.get_type().await else {
+                continue;
+            };
+            let Ok(target_type) = TargetDeviceTypeId::try_from(kind.as_str()) else {
+                continue;
+            };
+            if target_type.is_gamepad() {
+                return true;
+            }
+        }
+        false
     }
 
     /// Create and start the given type of target device and return a mapping

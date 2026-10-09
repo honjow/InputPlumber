@@ -187,6 +187,12 @@ impl TouchState {
 pub struct TouchscreenEventDevice {
     device: Device,
     translator: Option<EventTranslator>,
+    state: TouchscreenState,
+}
+
+/// Device-independent touch state, also used for evdev replay tests.
+#[derive(Debug, Default)]
+struct TouchscreenState {
     orientation: Orientation,
     axes_info: HashMap<AbsoluteAxisCode, AbsInfo>,
     touch_state: [TouchState; 10], // NOTE: Max of 10 touch inputs
@@ -288,17 +294,19 @@ impl TouchscreenEventDevice {
 
         Ok(Self {
             device,
-            orientation,
             translator,
-            axes_info,
-            touch_state: Default::default(),
-            dirty_states: HashSet::with_capacity(10),
-            last_touch_idx: 0,
-            gesture_state: GestureState::default(),
-            grab,
+            state: TouchscreenState {
+                orientation,
+                axes_info,
+                dirty_states: HashSet::with_capacity(10),
+                grab,
+                ..Default::default()
+            },
         })
     }
+}
 
+impl TouchscreenState {
     /// Translate the given evdev event into a native event
     fn translate(&mut self, event: InputEvent) -> Vec<NativeEvent> {
         log::trace!("Received event: {:?}", event);
@@ -419,7 +427,8 @@ impl TouchscreenEventDevice {
                         // In grab mode, pre-suppress touches that start in the
                         // edge zone to avoid any leakage before gesture confirm.
                         let suppressing = self.grab
-                            && !(GESTURE_SUPPRESS_START..=1.0 - GESTURE_SUPPRESS_START).contains(&normal_value);
+                            && !(GESTURE_SUPPRESS_START..=1.0 - GESTURE_SUPPRESS_START)
+                                .contains(&normal_value);
                         self.gesture_state.start_x = normal_value;
                         self.gesture_state.start_time = Some(Instant::now());
                         self.gesture_state.phase = GesturePhase::Tracking { suppressing };
@@ -451,7 +460,8 @@ impl TouchscreenEventDevice {
                         // In grab mode, also suppress touches starting at the
                         // top or bottom edge.
                         if self.grab
-                            && !(GESTURE_SUPPRESS_START..=1.0 - GESTURE_SUPPRESS_START).contains(&normal_value)
+                            && !(GESTURE_SUPPRESS_START..=1.0 - GESTURE_SUPPRESS_START)
+                                .contains(&normal_value)
                         {
                             self.gesture_state.phase = GesturePhase::Tracking { suppressing: true };
                         }
@@ -601,7 +611,7 @@ impl SourceInputDevice for TouchscreenEventDevice {
         if self.translator.is_none() {
             let translated_events: Vec<NativeEvent> = events
                 .into_iter()
-                .map(|e| self.translate(e))
+                .map(|e| self.state.translate(e))
                 .filter(|events| !events.is_empty())
                 .flatten()
                 .collect();
@@ -630,7 +640,7 @@ impl SourceInputDevice for TouchscreenEventDevice {
         // Convert the events into native events
         let translated_events: Vec<NativeEvent> = untranslated_events
             .into_iter()
-            .map(|e| self.translate(e))
+            .map(|e| self.state.translate(e))
             .filter(|events| !events.is_empty())
             .flatten()
             .collect();
@@ -658,7 +668,7 @@ impl SourceOutputDevice for TouchscreenEventDevice {}
 impl Debug for TouchscreenEventDevice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TouchscreenEventDevice")
-            .field("axes_info", &self.axes_info)
+            .field("axes_info", &self.state.axes_info)
             .finish()
     }
 }
@@ -670,4 +680,140 @@ fn normalize_unsigned_value(raw_value: i32, max: i32) -> f64 {
         return 0.0;
     }
     raw_value as f64 / max as f64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use evdev::EventType;
+
+    fn touchscreen(orientation: Orientation, grab: bool) -> TouchscreenState {
+        TouchscreenState {
+            orientation,
+            grab,
+            axes_info: HashMap::from([
+                (
+                    AbsoluteAxisCode::ABS_MT_POSITION_X,
+                    AbsInfo::new(0, 0, 1000, 0, 0, 0),
+                ),
+                (
+                    AbsoluteAxisCode::ABS_MT_POSITION_Y,
+                    AbsInfo::new(0, 0, 1000, 0, 0, 0),
+                ),
+            ]),
+            ..Default::default()
+        }
+    }
+
+    fn frame(state: &mut TouchscreenState, x: i32, y: i32) -> Vec<NativeEvent> {
+        state.translate(InputEvent::new(
+            EventType::ABSOLUTE.0,
+            AbsoluteAxisCode::ABS_MT_POSITION_X.0,
+            x,
+        ));
+        state.translate(InputEvent::new(
+            EventType::ABSOLUTE.0,
+            AbsoluteAxisCode::ABS_MT_POSITION_Y.0,
+            y,
+        ));
+        state.translate(InputEvent::new(
+            EventType::SYNCHRONIZATION.0,
+            SynchronizationCode::SYN_REPORT.0,
+            0,
+        ))
+    }
+
+    #[test]
+    fn edge_swipes_emit_one_press_release_pair() {
+        for (start, end, expected) in [
+            ((0, 100), (200, 100), GestureType::Right(GestureArea::Top)),
+            (
+                (1000, 800),
+                (800, 800),
+                GestureType::Left(GestureArea::Bottom),
+            ),
+            ((500, 1000), (500, 800), GestureType::Up),
+            ((500, 0), (500, 200), GestureType::Down),
+        ] {
+            let mut state = touchscreen(Orientation::Normal, true);
+            assert!(frame(&mut state, start.0, start.1).is_empty());
+            let events = frame(&mut state, end.0, end.1);
+            assert_eq!(events.len(), 2);
+            assert_eq!(
+                events[0].as_capability(),
+                Capability::Touchscreen(Touch::Gesture(expected))
+            );
+            assert!(events[0].pressed());
+            assert!(!events[1].pressed());
+            assert!(frame(&mut state, end.0, end.1).is_empty());
+        }
+    }
+
+    #[test]
+    fn rotated_swipes_follow_display_orientation() {
+        for (orientation, expected) in [
+            (Orientation::Normal, GestureType::Right(GestureArea::Bottom)),
+            (Orientation::RotateLeft, GestureType::Down),
+            (Orientation::RotateRight, GestureType::Up),
+            (
+                Orientation::UpsideDown,
+                GestureType::Left(GestureArea::Bottom),
+            ),
+        ] {
+            let mut state = touchscreen(orientation, true);
+            frame(&mut state, 0, 500);
+            let events = frame(&mut state, 200, 500);
+            assert_eq!(
+                events[0].as_capability(),
+                Capability::Touchscreen(Touch::Gesture(expected))
+            );
+        }
+    }
+
+    #[test]
+    fn suppressed_edge_tap_replays_touch_press_and_release() {
+        let mut state = touchscreen(Orientation::Normal, true);
+        assert!(frame(&mut state, 0, 500).is_empty());
+        let events = state.translate(InputEvent::new(
+            EventType::ABSOLUTE.0,
+            AbsoluteAxisCode::ABS_MT_TRACKING_ID.0,
+            -1,
+        ));
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0].as_capability(),
+            Capability::Touchscreen(Touch::Motion)
+        );
+        for (event, touching) in events.iter().zip([true, false]) {
+            assert!(
+                matches!(event.get_value(), InputValue::Touch { is_touching, x: Some(0.0), y: Some(0.5), .. } if is_touching == touching)
+            );
+        }
+        assert!(state.gesture_state.is_idle());
+    }
+
+    #[test]
+    fn second_slot_and_timeout_disable_gesture_recognition() {
+        let mut state = touchscreen(Orientation::Normal, true);
+        frame(&mut state, 0, 500);
+        state.translate(InputEvent::new(
+            EventType::ABSOLUTE.0,
+            AbsoluteAxisCode::ABS_MT_SLOT.0,
+            1,
+        ));
+        state.translate(InputEvent::new(
+            EventType::ABSOLUTE.0,
+            AbsoluteAxisCode::ABS_MT_SLOT.0,
+            0,
+        ));
+        assert!(frame(&mut state, 200, 500).iter().all(|event| !matches!(
+            event.as_capability(),
+            Capability::Touchscreen(Touch::Gesture(_))
+        )));
+        let mut state = touchscreen(Orientation::Normal, true);
+        frame(&mut state, 0, 500);
+        state.gesture_state.start_time =
+            Some(Instant::now() - GESTURE_TIME - Duration::from_millis(1));
+        assert!(frame(&mut state, 200, 500).is_empty());
+    }
 }

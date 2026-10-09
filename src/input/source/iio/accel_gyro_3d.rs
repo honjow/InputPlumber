@@ -1,10 +1,4 @@
-use std::{
-    collections::HashSet,
-    error::Error,
-    fmt::Debug,
-    os::fd::RawFd,
-    time::Duration,
-};
+use std::{collections::HashSet, error::Error, fmt::Debug, os::fd::RawFd, time::Duration};
 
 use crate::{
     config,
@@ -20,6 +14,9 @@ use crate::{
 const RESUME_RECOVER_DELAY: Duration = Duration::from_secs(3);
 
 // Scale from IIO SI units to Steam Deck UHID raw LSB.
+// IIO channels report m/s² for accel and rad/s for gyro after applying scale:
+//   https://www.kernel.org/doc/Documentation/ABI/testing/sysfs-bus-iio
+// UHID LSB constants from src/drivers/steam_deck/driver.rs.
 const ACCEL_SCALE_FACTOR: f64 = 1632.6530612244898; // 1 / 0.0006125 (m/s² → UHID LSB)
 const GYRO_SCALE_FACTOR: f64 = 916.7324722093172; // (180/π) / 0.0625 (rad/s → °/s → UHID LSB)
 
@@ -118,7 +115,10 @@ impl SourceInputDevice for AccelGyro3dImu {
     }
 
     fn on_suspend(&mut self) {
-        log::info!("Tearing down IIO driver for {} before suspend", self.device_name);
+        log::info!(
+            "Tearing down IIO driver for {} before suspend",
+            self.device_name
+        );
         self.driver = None;
     }
 
@@ -127,7 +127,10 @@ impl SourceInputDevice for AccelGyro3dImu {
             return;
         }
 
-        log::info!("Recreating IIO driver for {} after resume", self.device_name);
+        log::info!(
+            "Recreating IIO driver for {} after resume",
+            self.device_name
+        );
         std::thread::sleep(RESUME_RECOVER_DELAY);
 
         match Driver::new(

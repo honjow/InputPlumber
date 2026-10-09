@@ -1,6 +1,9 @@
 pub mod client;
 pub mod command;
 pub mod targets;
+mod watchdog;
+
+use watchdog::TranslatableWatchdog;
 
 use std::{
     borrow::Borrow,
@@ -49,6 +52,19 @@ use super::{
     info::DeviceInfo, manager::ManagerCommand, output_event::OutputEvent,
     source::client::SourceDeviceClient, target::client::TargetDeviceClient,
 };
+
+/// Exact gesture regions override Any-area mappings. All mappings use the same
+/// translation path so wildcard gestures retain their original source metadata.
+fn profile_mappings<'a>(
+    mappings: &'a HashMap<Capability, Vec<ProfileMapping>>,
+    source: &Capability,
+) -> Option<&'a Vec<ProfileMapping>> {
+    mappings.get(source).or_else(|| {
+        source
+            .with_gesture_area_any()
+            .and_then(|any| mappings.get(&any))
+    })
+}
 
 /// Size of the command channel buffer for processing input events and commands.
 const BUFFER_SIZE: usize = 16384;
@@ -114,7 +130,7 @@ pub struct CompositeDevice {
     emitted_mappings: HashSet<String>,
     /// Tracks the most recent press/repeat sequence for each translatable capability.
     /// Used to synthesize a release when firmware misses key-up events.
-    translatable_sequence: HashMap<Capability, u64>,
+    translatable_watchdog: TranslatableWatchdog,
     /// Mode defining how inputs should be routed
     intercept_mode: InterceptMode,
     /// Transmit channel for sending commands to this composite device
@@ -183,7 +199,8 @@ impl CompositeDevice {
         let (tx, rx) = mpsc::channel(BUFFER_SIZE);
         let name = config.name.clone();
         let dbus = DBusInterfaceManager::new(conn.clone(), dbus_path.clone())?;
-        let targets = CompositeDeviceTargets::new(conn, dbus_path, tx.clone().into(), manager, &config);
+        let targets =
+            CompositeDeviceTargets::new(conn, dbus_path, tx.clone().into(), manager, &config);
         let mut device = Self {
             dbus,
             config,
@@ -200,7 +217,7 @@ impl CompositeDevice {
             translatable_active_inputs: Vec::new(),
             translated_recent_events: HashSet::new(),
             emitted_mappings: HashSet::new(),
-            translatable_sequence: HashMap::new(),
+            translatable_watchdog: TranslatableWatchdog::default(),
             intercept_mode: InterceptMode::None,
             tx: tx.clone(),
             rx,
@@ -529,10 +546,7 @@ impl CompositeDevice {
                         break 'main;
                     }
                     CompositeCommand::Suspend(sender) => {
-                        log::info!(
-                            "Preparing to suspend devices for: {}",
-                            self.dbus.path()
-                        );
+                        log::info!("Preparing to suspend devices for: {}", self.dbus.path());
                         for (id, source) in self.source_devices.iter() {
                             if let Err(e) = source.suspend().await {
                                 log::error!("Failed to suspend source device {id}: {e:?}");
@@ -544,10 +558,7 @@ impl CompositeDevice {
                         }
                     }
                     CompositeCommand::Resume(sender) => {
-                        log::info!(
-                            "Preparing to resume devices for: {}",
-                            self.dbus.path()
-                        );
+                        log::info!("Preparing to resume devices for: {}", self.dbus.path());
                         self.targets.handle_resume().await;
                         for (id, source) in self.source_devices.iter() {
                             if let Err(e) = source.resume().await {
@@ -750,14 +761,16 @@ impl CompositeDevice {
         // Check if the event needs to be translated based on the
         // capability map. Translated events will be re-enqueued, so this will
         // return early.
-        log::trace!(
-            "Translatable capabilities: {:?}",
-            self.translatable_capabilities
-        );
-        if self.capability_map.is_some() && self.translatable_capabilities.contains(&cap) {
-            log::trace!("Capability mapping found for event");
-            self.translate_capability(&event).await?;
-            return Ok(());
+        if !self.translatable_capabilities.is_empty() {
+            log::trace!(
+                "Translatable capabilities: {:?}",
+                self.translatable_capabilities
+            );
+            if self.capability_map.is_some() && self.translatable_capabilities.contains(&cap) {
+                log::trace!("Capability mapping found for event");
+                self.translate_capability(&event).await?;
+                return Ok(());
+            }
         }
         self.handle_event(event).await?;
 
@@ -1217,10 +1230,7 @@ impl CompositeDevice {
         cap: Capability,
         seq: u64,
     ) -> Result<(), Box<dyn Error>> {
-        let Some(current_seq) = self.translatable_sequence.get(&cap).copied() else {
-            return Ok(());
-        };
-        if current_seq != seq {
+        if !self.translatable_watchdog.is_current(&cap, seq) {
             return Ok(());
         }
         if !self.translatable_active_inputs.contains(&cap) {
@@ -1235,7 +1245,7 @@ impl CompositeDevice {
         {
             self.translatable_active_inputs.remove(idx);
         }
-        self.translatable_sequence.remove(&cap);
+        self.translatable_watchdog.cancel(&cap);
 
         // Emit release for any single-source mapping tied to this capability.
         let Some(map) = self.capability_map.as_ref() else {
@@ -1245,7 +1255,8 @@ impl CompositeDevice {
         match map {
             CapabilityMapConfig::V1(config) => {
                 for mapping in config.mapping.iter() {
-                    if mapping.source_events.len() != 1 || !self.emitted_mappings.contains(&mapping.name)
+                    if mapping.source_events.len() != 1
+                        || !self.emitted_mappings.contains(&mapping.name)
                     {
                         continue;
                     }
@@ -1263,11 +1274,13 @@ impl CompositeDevice {
             }
             CapabilityMapConfig::V2(config) => {
                 for mapping in config.mapping.iter() {
-                    if mapping.source_events.len() != 1 || !self.emitted_mappings.contains(&mapping.name)
+                    if mapping.source_events.len() != 1
+                        || !self.emitted_mappings.contains(&mapping.name)
                     {
                         continue;
                     }
-                    let Some(capability_config) = mapping.source_events[0].capability.as_ref() else {
+                    let Some(capability_config) = mapping.source_events[0].capability.as_ref()
+                    else {
                         continue;
                     };
                     let source_cap: Capability = capability_config.clone().into();
@@ -1368,14 +1381,10 @@ impl CompositeDevice {
             .iter()
             .position(|c| c == &event_capability);
 
-        // Refresh stale-release watchdog for pressed/repeat events.
-        if event.pressed() {
-            let seq = self
-                .translatable_sequence
-                .entry(event_capability.clone())
-                .and_modify(|s| *s += 1)
-                .or_insert(1);
-            let seq = *seq;
+        // Only known firmware quirks opt in. Ordinary holds and chords must
+        // not acquire the old global 350ms timeout.
+        if event.pressed() && stale_release_enabled(&self.config, &event_capability) {
+            let seq = self.translatable_watchdog.refresh(event_capability.clone());
             let tx = self.tx.clone();
             let cap = event_capability.clone();
             tokio::task::spawn(async move {
@@ -1388,13 +1397,14 @@ impl CompositeDevice {
                 }
             });
         } else {
-            self.translatable_sequence.remove(&event_capability);
+            self.translatable_watchdog.cancel(&event_capability);
         }
 
         if event.pressed() {
             if capability_idx.is_none() {
                 log::trace!("Adding capability to active inputs: {:?}", event_capability);
-                self.translatable_active_inputs.push(event_capability.clone());
+                self.translatable_active_inputs
+                    .push(event_capability.clone());
                 log::trace!(
                     "Active translatable inputs: {:?}",
                     self.translatable_active_inputs
@@ -1428,10 +1438,11 @@ impl CompositeDevice {
                 // Loop over each mapping and try to match source events
                 for mapping in config.mapping.iter() {
                     // Only evaluate a mapping when the current event belongs to its source events.
-                    let is_mapping_source_event = mapping.source_events.iter().any(|source_event| {
-                        let cap: Capability = source_event.clone().into();
-                        cap != Capability::NotImplemented && cap == event_capability
-                    });
+                    let is_mapping_source_event =
+                        mapping.source_events.iter().any(|source_event| {
+                            let cap: Capability = source_event.clone().into();
+                            cap != Capability::NotImplemented && cap == event_capability
+                        });
                     if !is_mapping_source_event {
                         continue;
                     }
@@ -1481,7 +1492,9 @@ impl CompositeDevice {
                             }
                         }
 
-                        if !is_missing_source_event && !self.emitted_mappings.contains(&mapping.name) {
+                        if !is_missing_source_event
+                            && !self.emitted_mappings.contains(&mapping.name)
+                        {
                             let cap = mapping.target_event.clone().into();
                             if cap == Capability::NotImplemented {
                                 continue;
@@ -1498,13 +1511,14 @@ impl CompositeDevice {
                 // Loop over each mapping and try to match source events
                 for mapping in config.mapping.iter() {
                     // Only evaluate a mapping when the current event belongs to its source events.
-                    let is_mapping_source_event = mapping.source_events.iter().any(|source_event| {
-                        let Some(capability_config) = source_event.capability.as_ref() else {
-                            return false;
-                        };
-                        let cap: Capability = capability_config.clone().into();
-                        cap != Capability::NotImplemented && cap == event_capability
-                    });
+                    let is_mapping_source_event =
+                        mapping.source_events.iter().any(|source_event| {
+                            let Some(capability_config) = source_event.capability.as_ref() else {
+                                return false;
+                            };
+                            let cap: Capability = capability_config.clone().into();
+                            cap != Capability::NotImplemented && cap == event_capability
+                        });
                     if !is_mapping_source_event {
                         continue;
                     }
@@ -1562,7 +1576,9 @@ impl CompositeDevice {
                             }
                         }
 
-                        if !is_missing_source_event && !self.emitted_mappings.contains(&mapping.name) {
+                        if !is_missing_source_event
+                            && !self.emitted_mappings.contains(&mapping.name)
+                        {
                             let cap = mapping.target_event.clone().into();
                             if cap == Capability::NotImplemented {
                                 continue;
@@ -1617,7 +1633,7 @@ impl CompositeDevice {
         // Lookup the profile mapping associated with this event capability. If
         // none is found, return the original un-translated event.
         let source_cap = event.as_capability();
-        if let Some(mappings) = self.device_profile_config_map.get(&source_cap) {
+        if let Some(mappings) = profile_mappings(&self.device_profile_config_map, &source_cap) {
             // Find which mappings in the device profile matches this source event
             let matched_mappings = mappings
                 .iter()
@@ -1700,92 +1716,6 @@ impl CompositeDevice {
                 }
             }
             return Ok(events);
-        }
-
-        // For gesture capabilities with a specific area (Top/Bottom), fall back
-        // to any GestureArea::Any mapping configured in the profile.
-        if let Some(any_cap) = source_cap.with_gesture_area_any() {
-            if let Some(mappings) = self.device_profile_config_map.get(&any_cap) {
-                let matched_mappings = mappings
-                    .iter()
-                    .filter(|mapping| mapping.source_matches_properties(event));
-
-                let mut events = Vec::new();
-                for mapping in matched_mappings {
-                    log::trace!(
-                        "Found Any-area translation for gesture {:?} via mapping: {}",
-                        source_cap,
-                        mapping.name
-                    );
-
-                    for target_event in mapping.target_events.iter() {
-                        let target_cap: Capability = target_event.clone().into();
-                        let result = event.get_value().translate(
-                            &source_cap,
-                            &mapping.source_event,
-                            &target_cap,
-                            target_event,
-                        );
-                        let value = match result {
-                            Ok(v) => v,
-                            Err(err) => {
-                                match err {
-                                    TranslationError::NotImplemented => {
-                                        log::warn!(
-                                            "Translation not implemented for Any-area mapping '{}': {:?} -> {:?}",
-                                            mapping.name,
-                                            source_cap,
-                                            target_cap,
-                                        );
-                                        continue;
-                                    }
-                                    TranslationError::ImpossibleTranslation(msg) => {
-                                        log::warn!(
-                                            "Impossible translation for Any-area mapping '{}': {msg}",
-                                            mapping.name
-                                        );
-                                        continue;
-                                    }
-                                    TranslationError::InvalidSourceConfig(msg) => {
-                                        log::warn!("Invalid source event config in Any-area mapping '{}': {msg}", mapping.name);
-                                        continue;
-                                    }
-                                    TranslationError::InvalidTargetConfig(msg) => {
-                                        log::warn!("Invalid target event config in Any-area mapping '{}': {msg}", mapping.name);
-                                        continue;
-                                    }
-                                }
-                            }
-                        };
-                        if matches!(value, InputValue::None) {
-                            continue;
-                        }
-
-                        if source_cap.is_momentary_translation(&target_cap) {
-                            events.push(NativeEvent::new_translated(
-                                source_cap.clone(),
-                                target_cap.clone(),
-                                InputValue::Bool(true),
-                            ));
-                            events.push(NativeEvent::new_translated(
-                                source_cap.clone(),
-                                target_cap,
-                                InputValue::Bool(false),
-                            ));
-                            continue;
-                        }
-
-                        events.push(NativeEvent::new_translated(
-                            source_cap.clone(),
-                            target_cap,
-                            value,
-                        ));
-                    }
-                }
-                if !events.is_empty() {
-                    return Ok(events);
-                }
-            }
         }
 
         log::trace!("No translation mapping found for event: {:?}", source_cap);
@@ -2015,6 +1945,40 @@ impl CompositeDevice {
                 }
                 self.capabilities.insert(cap.clone());
             }
+            // If Gyroscope or Accelerometer capabilties exist, report that Gamepad::Accelerometer and
+            // Gamepad::Gyro exist so the tester works. This is because we're blanket converting
+            // them before sending to targets.
+            //TODO: Remove this one Gamepad::Gyro/Gamepad::Accel are removed.
+            if self
+                .capabilities
+                .iter()
+                .any(|cap| matches!(cap, Capability::Accelerometer(_)))
+            {
+                self.capabilities
+                    .retain(|cap| !matches!(cap, Capability::Accelerometer(_)));
+                if !self
+                    .capabilities
+                    .contains(&Capability::Gamepad(Gamepad::Accelerometer))
+                {
+                    self.capabilities
+                        .insert(Capability::Gamepad(Gamepad::Accelerometer));
+                }
+            }
+            if self
+                .capabilities
+                .iter()
+                .any(|cap| matches!(cap, Capability::Gyroscope(_)))
+            {
+                self.capabilities
+                    .retain(|cap| !matches!(cap, Capability::Gyroscope(_)));
+                if !self
+                    .capabilities
+                    .contains(&Capability::Gamepad(Gamepad::Gyro))
+                {
+                    self.capabilities.insert(Capability::Gamepad(Gamepad::Gyro));
+                }
+            }
+
             self.capabilities_by_source.insert(id.clone(), capabilities);
 
             // Get the output capabilities of the source device and keep track
@@ -2442,5 +2406,132 @@ impl CompositeDevice {
                 log::error!("Failed to set filtered events on source devices: {e}");
             };
         });
+    }
+}
+
+/// The device profile explicitly opts in keyboard keys with missing releases.
+fn stale_release_enabled(config: &CompositeDeviceConfig, capability: &Capability) -> bool {
+    let Some(keys) = config
+        .options
+        .as_ref()
+        .and_then(|options| options.translatable_stale_keys.as_ref())
+    else {
+        return false;
+    };
+    keys.iter().any(|name| {
+        name.parse()
+            .map(|key| Capability::Keyboard(key) == *capability)
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(test)]
+mod stale_release_tests {
+    use super::*;
+    use crate::input::capability::Keyboard;
+
+    #[test]
+    fn only_win5_delete_opts_into_stale_release() {
+        let win5 = CompositeDeviceConfig::from_yaml_file(
+            "rootfs/usr/share/inputplumber/devices/50-gpd_win5.yaml".into(),
+        )
+        .unwrap();
+        assert!(stale_release_enabled(
+            &win5,
+            &Capability::Keyboard(Keyboard::KeyDelete)
+        ));
+        assert!(!stale_release_enabled(
+            &win5,
+            &Capability::Keyboard(Keyboard::KeyF14)
+        ));
+        assert!(!stale_release_enabled(
+            &win5,
+            &Capability::Keyboard(Keyboard::KeyLeftMeta)
+        ));
+        let tf = CompositeDeviceConfig::from_yaml_file(
+            "rootfs/usr/share/inputplumber/devices/50-tf_handle5.yaml".into(),
+        )
+        .unwrap();
+        assert!(!stale_release_enabled(
+            &tf,
+            &Capability::Keyboard(Keyboard::KeyDelete)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod gesture_mapping_tests {
+    use super::*;
+    use crate::input::capability::{GestureArea, GestureType, Touch};
+
+    fn gesture(area: GestureArea) -> Capability {
+        Capability::Touchscreen(Touch::Gesture(GestureType::Right(area)))
+    }
+
+    fn mapping(name: &str) -> Vec<ProfileMapping> {
+        vec![ProfileMapping {
+            name: name.into(),
+            source_event: Default::default(),
+            target_events: Vec::new(),
+        }]
+    }
+
+    #[test]
+    fn exact_gesture_region_overrides_wildcard() {
+        let mappings = HashMap::from([
+            (gesture(GestureArea::Any), mapping("wildcard")),
+            (gesture(GestureArea::Top), mapping("top")),
+        ]);
+        assert_eq!(
+            profile_mappings(&mappings, &gesture(GestureArea::Top)).unwrap()[0].name,
+            "top"
+        );
+        assert_eq!(
+            profile_mappings(&mappings, &gesture(GestureArea::Bottom)).unwrap()[0].name,
+            "wildcard"
+        );
+        assert!(profile_mappings(
+            &mappings,
+            &Capability::Touchscreen(Touch::Gesture(GestureType::Up))
+        )
+        .is_none());
+        assert!(profile_mappings(&mappings, &Capability::Touchscreen(Touch::Motion)).is_none());
+    }
+
+    #[test]
+    fn default_gesture_profile_maps_to_guide_and_quick_access() {
+        let profile = DeviceProfile::from_yaml(
+            include_str!("../../../rootfs/usr/share/inputplumber/profiles/default.yaml").into(),
+        )
+        .unwrap();
+        let mappings: HashMap<_, Vec<_>> = profile
+            .mapping
+            .into_iter()
+            .map(|mapping| (mapping.source_event.clone().into(), vec![mapping]))
+            .collect();
+        for (source, button) in [
+            (gesture(GestureArea::Bottom), GamepadButton::Guide),
+            (
+                Capability::Touchscreen(Touch::Gesture(GestureType::Left(GestureArea::Bottom))),
+                GamepadButton::QuickAccess,
+            ),
+        ] {
+            let mapping = &profile_mappings(&mappings, &source).unwrap()[0];
+            let target: Capability = mapping.target_events[0].clone().into();
+            assert_eq!(target, Capability::Gamepad(Gamepad::Button(button)));
+            for pressed in [true, false] {
+                let value = InputValue::Bool(pressed)
+                    .translate(
+                        &source,
+                        &mapping.source_event,
+                        &target,
+                        &mapping.target_events[0],
+                    )
+                    .unwrap();
+                assert_eq!(value.pressed(), pressed);
+                let event = NativeEvent::new_translated(source.clone(), target.clone(), value);
+                assert_eq!(event.get_source_capability(), Some(source.clone()));
+            }
+        }
     }
 }

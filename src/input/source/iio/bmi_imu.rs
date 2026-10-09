@@ -1,10 +1,5 @@
 use std::{
-    collections::HashSet,
-    error::Error,
-    f64::consts::PI,
-    fmt::Debug,
-    os::fd::RawFd,
-    time::Duration,
+    collections::HashSet, error::Error, f64::consts::PI, fmt::Debug, os::fd::RawFd, time::Duration,
 };
 
 use crate::{
@@ -59,8 +54,16 @@ impl BmiImu {
 
         let id = device_info.sysname();
         let name = device_info.name();
-        ensure_hrtimer_trigger();
-        let driver = Driver::new(id.clone(), name.clone(), mount_matrix.clone(), use_buffer, sample_rate)?;
+        if use_buffer != Some(false) {
+            ensure_hrtimer_trigger();
+        }
+        let driver = Driver::new(
+            id.clone(),
+            name.clone(),
+            mount_matrix.clone(),
+            use_buffer,
+            sample_rate,
+        )?;
 
         Ok(Self {
             driver: Some(driver),
@@ -111,12 +114,19 @@ impl SourceInputDevice for BmiImu {
         log::info!("Recreating IIO driver for {name} after resume");
         std::thread::sleep(RESUME_RECOVER_DELAY);
 
-        match Driver::new(
+        // Recreate the software trigger before creating the fresh IIO context.
+        // Merely creating it is insufficient: BMI260 still advertises its broken
+        // data-ready trigger after resume, so explicitly prefer hrtimer below.
+        if self.use_buffer != Some(false) {
+            ensure_hrtimer_trigger();
+        }
+        match Driver::new_with_trigger_preference(
             self.device_id.clone(),
             self.device_name.clone(),
             self.mount_matrix.clone(),
             self.use_buffer,
             self.sample_rate,
+            true,
         ) {
             Ok(mut new_driver) => {
                 new_driver.update_filtered_events(self.event_filter.clone());
@@ -201,9 +211,7 @@ pub const CAPABILITIES: &[Capability] = &[
 
 fn ensure_hrtimer_trigger() {
     const TRIGGER_NAME: &str = "inputplumber_hrtimer";
-    let configfs_path = format!(
-        "/sys/kernel/config/iio/triggers/hrtimer/{TRIGGER_NAME}"
-    );
+    let configfs_path = format!("/sys/kernel/config/iio/triggers/hrtimer/{TRIGGER_NAME}");
 
     if std::path::Path::new(&configfs_path).exists() {
         log::debug!("hrtimer trigger already exists");
@@ -241,4 +249,3 @@ fn disable_iio_buffer(device_id: &str) {
         }
     }
 }
-

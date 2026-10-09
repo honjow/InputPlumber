@@ -36,12 +36,56 @@ pub mod evdev;
 pub mod hidraw;
 pub mod iio;
 pub mod led;
+#[cfg(test)]
+mod lifecycle_tests;
 pub mod tty;
 
 /// Size of the [SourceCommand] buffer for receiving output events
 const BUFFER_SIZE: usize = 2048;
 /// Default poll rate (2.5ms/400Hz)
 const POLL_RATE: Duration = Duration::from_micros(2500);
+
+/// Round a positive fd wait up to milliseconds and clamp without truncation.
+/// A zero fixed polling rate means the device supplies its own wait; fd-driven
+/// devices still need a finite wait so they can receive lifecycle commands.
+fn fd_poll_timeout(poll_rate: Duration, elapsed: Duration) -> u16 {
+    let interval = if poll_rate.is_zero() {
+        POLL_RATE
+    } else {
+        poll_rate
+    };
+    let remaining = interval.saturating_sub(elapsed);
+    remaining
+        .as_nanos()
+        .div_ceil(1_000_000)
+        .min(u16::MAX as u128) as u16
+}
+
+/// Stop a disconnected or invalid fd source instead of repeatedly polling an
+/// immediately-ready error condition. EINTR remains a normal retry on the next loop.
+fn poll_source_fds(fds: &mut [nix::poll::PollFd<'_>], timeout_ms: u16) -> Result<(), InputError> {
+    match nix::poll::poll(fds, timeout_ms) {
+        Ok(_) => {
+            for fd in fds {
+                check_poll_events(fd.revents())?;
+            }
+            Ok(())
+        }
+        Err(nix::errno::Errno::EINTR) => Ok(()),
+        Err(error) => Err(format!("Failed to wait for source input: {error}").into()),
+    }
+}
+
+fn check_poll_events(events: Option<nix::poll::PollFlags>) -> Result<(), InputError> {
+    use nix::poll::PollFlags;
+    let Some(events) = events else {
+        return Err("Unexpected source poll event flags".into());
+    };
+    if events.intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL) {
+        return Err(format!("Source fd is no longer readable: {events:?}").into());
+    }
+    Ok(())
+}
 
 /// Possible errors for a source device client
 #[derive(Error, Debug)]
@@ -117,6 +161,7 @@ pub trait SourceInputDevice {
     /// Returns the possible input events this device is capable of emitting
     fn get_capabilities(&self) -> Result<Vec<Capability>, InputError>;
 
+    /// Return descriptors owned by the implementation, valid until its next mutable call.
     fn get_poll_fds(&self) -> Vec<RawFd> {
         vec![]
     }
@@ -393,37 +438,23 @@ impl<T: SourceInputDevice + SourceOutputDevice + Send + 'static> SourceDriver<T>
                 };
 
                 let mut is_suspended = false;
-                let mut was_suspended = false;
-
-                let mut poll_fds_raw = implementation.get_poll_fds();
-                let mut use_fd_polling = !poll_fds_raw.is_empty();
-                if use_fd_polling {
-                    log::info!("Using fd-driven polling for {device_id}");
-                }
 
                 loop {
+                    // Handle lifecycle commands before polling. In particular, a suspend and
+                    // resume in the same batch must still run both lifecycle hooks.
+                    if let Err(e) = SourceDriver::receive_commands(
+                        &mut rx,
+                        &mut implementation,
+                        &mut event_filter,
+                        &mut is_suspended,
+                    ) {
+                        log::debug!("Error receiving commands: {e:?}");
+                        break;
+                    }
                     if is_suspended {
-                        was_suspended = true;
-                        if let Err(e) = SourceDriver::receive_commands(
-                            &mut rx,
-                            &mut implementation,
-                            &mut event_filter,
-                            &mut is_suspended,
-                        ) {
-                            log::debug!("Error receiving commands: {:?}", e);
-                            break;
-                        }
-                        thread::sleep(self.options.poll_rate);
                         continue;
                     }
-
-                    if was_suspended {
-                        was_suspended = false;
-                        log::info!("Source device {device_id} resuming, reinitializing");
-                        implementation.on_resume();
-                        poll_fds_raw = implementation.get_poll_fds();
-                        use_fd_polling = !poll_fds_raw.is_empty();
-                    }
+                    let poll_time_start = std::time::Instant::now();
 
                     // Create a context with performance metrics for each event
                     let mut context = if metrics_enabled {
@@ -486,35 +517,32 @@ impl<T: SourceInputDevice + SourceOutputDevice + Send + 'static> SourceDriver<T>
                         }
                     }
 
-                    // Receive commands/output events
-                    if let Err(e) = SourceDriver::receive_commands(
-                        &mut rx,
-                        &mut implementation,
-                        &mut event_filter,
-                        &mut is_suspended,
-                    ) {
-                        log::debug!("Error receiving commands: {:?}", e);
-                        break;
-                    }
-
-                    if use_fd_polling {
+                    // Fetch descriptors after polling and lifecycle transitions, since either
+                    // may recreate the device. No mutable driver call can close them while
+                    // they are borrowed below.
+                    let poll_fds_raw = implementation.get_poll_fds();
+                    let poll_time = poll_time_start.elapsed();
+                    if !poll_fds_raw.is_empty() {
                         use std::os::fd::BorrowedFd;
                         let mut pollfds: Vec<nix::poll::PollFd> = poll_fds_raw
                             .iter()
                             .map(|&fd| {
+                                // SAFETY: The implementation owns these fds and is locked for
+                                // this entire loop; it is not mutated until poll returns.
                                 let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
                                 nix::poll::PollFd::new(borrowed, nix::poll::PollFlags::POLLIN)
                             })
                             .collect();
-                        let timeout_ms = self.options.poll_rate.as_millis() as u16;
-                        match nix::poll::poll(&mut pollfds, timeout_ms) {
-                            Ok(_) | Err(nix::errno::Errno::EINTR) => {}
-                            Err(e) => {
-                                log::warn!("Poll error for {device_id}: {e}");
-                            }
-                        }
+                        let timeout_ms = fd_poll_timeout(self.options.poll_rate, poll_time);
+                        poll_source_fds(&mut pollfds, timeout_ms)
+                            .map_err(|error| format!("Poll error for {device_id}: {error}"))?;
+                    } else if let Some(remaining) = self.options.poll_rate.checked_sub(poll_time) {
+                        // Preserve upstream time compensation for fixed-rate and blocking
+                        // hidraw implementations (including a zero poll rate).
+                        log::trace!("{device_id:?}: Sleep time remaining: {remaining:?}");
+                        thread::sleep(remaining);
                     } else {
-                        thread::sleep(self.options.poll_rate);
+                        log::trace!("{device_id:?}: Total poll time: {poll_time:?}");
                     }
                 }
 
@@ -530,7 +558,8 @@ impl<T: SourceInputDevice + SourceOutputDevice + Send + 'static> SourceDriver<T>
     }
 
     /// Read commands sent to this device from the channel until it is
-    /// empty.
+    /// empty. While suspended, block for a command instead of sleeping at a possibly
+    /// zero poll rate. This also wakes immediately for Resume or Stop.
     fn receive_commands(
         rx: &mut mpsc::Receiver<SourceCommand>,
         implementation: &mut MutexGuard<'_, T>,
@@ -540,7 +569,12 @@ impl<T: SourceInputDevice + SourceOutputDevice + Send + 'static> SourceDriver<T>
         const MAX_COMMANDS: u8 = 64;
         let mut commands_processed = 0;
         loop {
-            match rx.try_recv() {
+            let command = if *is_suspended && commands_processed == 0 {
+                rx.blocking_recv().ok_or(TryRecvError::Disconnected)
+            } else {
+                rx.try_recv()
+            };
+            match command {
                 Ok(cmd) => match cmd {
                     SourceCommand::UploadEffect(data, composite_dev) => {
                         let res = match implementation.upload_effect(data) {
@@ -589,13 +623,18 @@ impl<T: SourceInputDevice + SourceOutputDevice + Send + 'static> SourceDriver<T>
                         };
                     }
                     SourceCommand::Suspend => {
-                        log::debug!("Source device suspending");
-                        implementation.on_suspend();
-                        *is_suspended = true;
+                        if !*is_suspended {
+                            log::debug!("Source device suspending");
+                            implementation.on_suspend();
+                            *is_suspended = true;
+                        }
                     }
                     SourceCommand::Resume => {
-                        log::debug!("Source device resumed");
-                        *is_suspended = false;
+                        if *is_suspended {
+                            log::debug!("Source device resuming");
+                            implementation.on_resume();
+                            *is_suspended = false;
+                        }
                     }
                 },
                 Err(e) => match e {

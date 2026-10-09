@@ -58,6 +58,14 @@ impl HidrawEventTranslator {
                     continue;
                 }
 
+                if hidraw.bit_offset.is_some_and(|bit| bit > 7) {
+                    log::warn!(
+                        "Invalid HID bit offset in mapping '{}', skipping",
+                        mapping.name
+                    );
+                    continue;
+                }
+
                 let detection = if let Some(value) = hidraw.value {
                     DetectionMode::Value(value)
                 } else if let Some(bit) = hidraw.bit_offset {
@@ -76,7 +84,10 @@ impl HidrawEventTranslator {
         }
 
         let state = vec![false; source_events.len()];
-        Self { source_events, state }
+        Self {
+            source_events,
+            state,
+        }
     }
 
     pub fn has_hid_translation(&self) -> bool {
@@ -84,7 +95,10 @@ impl HidrawEventTranslator {
     }
 
     pub fn capabilities(&self) -> Vec<Capability> {
-        self.source_events.iter().map(|m| m.capability.clone()).collect()
+        self.source_events
+            .iter()
+            .map(|m| m.capability.clone())
+            .collect()
     }
 
     /// Translate a raw HID report into [NativeEvent]s. Only emits events on
@@ -125,5 +139,77 @@ impl HidrawEventTranslator {
         }
 
         events
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::capability::{Gamepad, GamepadButton};
+
+    fn map(yaml: &str) -> HidrawEventTranslator {
+        HidrawEventTranslator::new(&serde_yaml::from_str(yaml).unwrap())
+    }
+
+    #[test]
+    fn win5_raw_report_replay_press_repeat_release() {
+        let mut translator = map(include_str!(
+            "../../../../rootfs/usr/share/inputplumber/capability_maps/gpd_v2_hid1.yaml"
+        ));
+        let idle = [1, 0xa5, 0, 0x5a, 0xff, 0, 1, 9, 0, 0, 0, 0];
+        assert!(translator.translate(&idle).is_empty());
+        let mut pressed = idle;
+        pressed[8..11].copy_from_slice(&[0x68, 0x69, 0x6a]);
+        let events = translator.translate(&pressed);
+        assert_eq!(events.len(), 3);
+        for (event, button) in events.iter().zip([
+            GamepadButton::QuickAccess,
+            GamepadButton::LeftPaddle1,
+            GamepadButton::RightPaddle1,
+        ]) {
+            assert_eq!(
+                event.as_capability(),
+                Capability::Gamepad(Gamepad::Button(button))
+            );
+            assert!(event.pressed());
+        }
+        assert!(translator.translate(&pressed).is_empty());
+        let releases = translator.translate(&idle);
+        assert_eq!(releases.len(), 3);
+        assert!(releases.iter().all(|event| !event.pressed()));
+        assert!(translator.translate(&idle).is_empty());
+    }
+
+    #[test]
+    fn first_pressed_report_and_short_packets() {
+        let mut translator = map(include_str!(
+            "../../../../rootfs/usr/share/inputplumber/capability_maps/tf_hid1.yaml"
+        ));
+        assert!(translator.translate(&[]).is_empty());
+        assert!(translator.translate(&[0; 9]).is_empty());
+        let mut report = [0; 10];
+        report[9] = 1;
+        assert!(translator.translate(&report)[0].pressed());
+        assert!(translator.translate(&[0; 9]).is_empty());
+        report[9] = 0;
+        assert!(!translator.translate(&report)[0].pressed());
+    }
+
+    #[test]
+    fn report_id_bit_and_value_filters() {
+        let mut translator = map("version: 2\nkind: CapabilityMap\nname: test\nid: test\nmapping:\n  - name: bit\n    source_events:\n      - hidraw: {input_type: button, report_id: 7, byte_start: 1, bit_offset: 7}\n    target_event: {gamepad: {button: QuickAccess}}\n  - name: value\n    source_events:\n      - hidraw: {input_type: button, report_id: 7, byte_start: 2, value: 105}\n    target_event: {gamepad: {button: LeftPaddle1}}\n");
+        assert!(translator.translate(&[6, 0x80, 105]).is_empty());
+        assert_eq!(translator.translate(&[7, 0x80, 105]).len(), 2);
+        assert!(translator.translate(&[6, 0, 0]).is_empty());
+        let released = translator.translate(&[7, 0x01, 104]);
+        assert_eq!(released.len(), 2);
+        assert!(released.iter().all(|event| !event.pressed()));
+    }
+
+    #[test]
+    fn invalid_bit_offset_is_rejected_without_panicking() {
+        let mut translator = map("version: 2\nkind: CapabilityMap\nname: invalid\nid: invalid\nmapping:\n  - name: invalid\n    source_events:\n      - hidraw: {input_type: button, byte_start: 0, bit_offset: 8}\n    target_event: {gamepad: {button: QuickAccess}}\n");
+        assert!(!translator.has_hid_translation());
+        assert!(translator.translate(&[0xff]).is_empty());
     }
 }

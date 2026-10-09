@@ -234,7 +234,15 @@
             "KeyProg1",
             "KeyProg2",
             "KeyProg3",
-            "KeyProg4"
+            "KeyProg4",
+            "KeyOk",
+            "KeyExit",
+            "KeyInfo",
+            "KeyRootMenu",
+            "KeyRed",
+            "KeyGreen",
+            "KeyYellow",
+            "KeyBlue"
           ]
         },
         "mouse": {
@@ -381,6 +389,20 @@
           "enum": [
             "Touch",
             "Press"
+          ]
+        },
+        "gesture": {
+          "type": "string",
+          "description": "Edge-swipe gesture type. Left/right swipes require an area suffix (:Top, :Bottom, :Any).",
+          "examples": [
+            "SwipeRight:Top",
+            "SwipeRight:Bottom",
+            "SwipeRight:Any",
+            "SwipeLeft:Top",
+            "SwipeLeft:Bottom",
+            "SwipeLeft:Any",
+            "SwipeUp",
+            "SwipeDown"
           ]
         }
       },

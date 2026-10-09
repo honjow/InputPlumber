@@ -43,6 +43,7 @@ pub struct Driver {
     accel_info: HashMap<String, AxisInfo>,
     gyro: HashMap<String, Channel>,
     gyro_info: HashMap<String, AxisInfo>,
+    /// List of events that should not be generated
     filtered_events: HashSet<Capability>,
     read_mode: ReadMode,
 }
@@ -54,6 +55,19 @@ impl Driver {
         matrix: Option<MountMatrix>,
         use_buffer: Option<bool>,
         sample_rate: Option<f64>,
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        Self::new_with_trigger_preference(id, name, matrix, use_buffer, sample_rate, false)
+    }
+
+    /// Recreate a device with a software-trigger preference when its hardware
+    /// data-ready interrupt does not survive suspend (notably BMI260).
+    pub fn new_with_trigger_preference(
+        id: String,
+        name: String,
+        matrix: Option<MountMatrix>,
+        use_buffer: Option<bool>,
+        sample_rate: Option<f64>,
+        prefer_hrtimer: bool,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         log::debug!("Creating IIO IMU driver instance for {name}");
 
@@ -113,9 +127,7 @@ impl Driver {
             if channels.is_empty() {
                 continue;
             }
-            if let Err(err) =
-                set_sample_rate_or_default(&device, channels, ch_type, sample_rate)
-            {
+            if let Err(err) = set_sample_rate_or_default(&device, channels, ch_type, sample_rate) {
                 log::warn!("Failed to set sample rate: {err}, falling back to max available");
                 set_sample_rate_max(&device, channels, ch_type);
             }
@@ -125,15 +137,13 @@ impl Driver {
         let rate = sample_rate.unwrap_or(DEFAULT_SAMPLE_RATE);
 
         let read_mode = if should_try_buffer {
-            match try_buffer_mode(&ctx, &device, &name, &accel, &gyro, rate) {
+            match try_buffer_mode(&ctx, &device, &name, &accel, &gyro, rate, prefer_hrtimer) {
                 Ok(mode) => {
                     log::info!("IIO buffer mode enabled for {name}");
                     mode
                 }
                 Err(e) => {
-                    log::warn!(
-                        "Buffer mode unavailable for {name}, using sysfs fallback: {e}"
-                    );
+                    log::warn!("Buffer mode unavailable for {name}, using sysfs fallback: {e}");
                     ReadMode::Sysfs
                 }
             }
@@ -169,7 +179,6 @@ impl Driver {
     pub fn has_gyro(&self) -> bool {
         !self.gyro.is_empty()
     }
-
 
     pub fn poll_fd(&self) -> Option<RawFd> {
         match &self.read_mode {
@@ -256,9 +265,14 @@ impl Driver {
             unreachable!();
         };
 
-        if let Err(e) = buffer.refill() {
-            log::trace!("Buffer refill: {e}");
-            return Ok(vec![]);
+        if let Err(error) = buffer.refill() {
+            if is_retryable_refill_error(&error) {
+                log::trace!("Buffer refill not ready: {error}");
+                return Ok(vec![]);
+            }
+            // A permanent device failure must reach the source owner rather than
+            // leave an apparently-live sensor that silently produces no samples.
+            return Err(error.into());
         }
 
         let mut events = vec![];
@@ -387,6 +401,23 @@ impl Driver {
     }
 }
 
+fn is_retryable_refill_error(error: &industrial_io::Error) -> bool {
+    match error {
+        industrial_io::Error::Io(error) => matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+        ),
+        // industrial-io currently uses a different nix version. Compare its
+        // OS errno value, not version-specific enum variants.
+        industrial_io::Error::Nix(error) => is_retryable_refill_errno(*error as i32),
+        _ => false,
+    }
+}
+
+fn is_retryable_refill_errno(errno: i32) -> bool {
+    matches!(errno, nix::libc::EAGAIN | nix::libc::EINTR)
+}
+
 fn rotate_value(m: &MountMatrix, value: &mut AxisData) {
     let x = value.roll;
     let y = value.pitch;
@@ -403,12 +434,13 @@ fn try_buffer_mode(
     accel: &HashMap<String, Channel>,
     gyro: &HashMap<String, Channel>,
     sample_rate: f64,
+    prefer_hrtimer: bool,
 ) -> Result<ReadMode, Box<dyn Error + Send + Sync>> {
     let device_id = device.id().unwrap_or_default();
 
     cleanup_iio_buffer_state(&device_id);
 
-    let trigger = trigger::find_trigger(ctx, name, sample_rate)
+    let trigger = trigger::find_trigger(ctx, name, sample_rate, prefer_hrtimer)
         .ok_or("No suitable IIO trigger found")?;
 
     let trigger_name = trigger.name().unwrap_or_default();
@@ -448,8 +480,14 @@ fn read_buffer_sample(
     storage_bits: u32,
 ) -> Option<i64> {
     match storage_bits {
-        16 => buffer.channel_iter::<i16>(channel).last().map(|&v| v as i64),
-        32 => buffer.channel_iter::<i32>(channel).last().map(|&v| v as i64),
+        16 => buffer
+            .channel_iter::<i16>(channel)
+            .last()
+            .map(|&v| v as i64),
+        32 => buffer
+            .channel_iter::<i32>(channel)
+            .last()
+            .map(|&v| v as i64),
         64 => buffer.channel_iter::<i64>(channel).last().copied(),
         _ => {
             log::warn!("Unsupported scan element storage bits: {storage_bits}");
@@ -461,7 +499,12 @@ fn read_buffer_sample(
 // Parse storage bits from sysfs type string, e.g. "le:s16/16>>0" → 16
 fn detect_storage_bits(device_id: &str) -> u32 {
     let base = format!("/sys/bus/iio/devices/{device_id}/scan_elements");
-    for name in ["in_accel_x_type", "in_anglvel_x_type", "in_accel_y_type", "in_anglvel_y_type"] {
+    for name in [
+        "in_accel_x_type",
+        "in_anglvel_x_type",
+        "in_accel_y_type",
+        "in_anglvel_y_type",
+    ] {
         let path = format!("{base}/{name}");
         if let Ok(type_str) = std::fs::read_to_string(&path) {
             if let Some(slash) = type_str.find('/') {
@@ -636,10 +679,7 @@ fn set_sample_rate_or_default(
     let avail = read_sample_rates_available(device, channels, &channel_type);
 
     if !avail.is_empty() && !avail.contains(&rate) {
-        return Err(format!(
-            "Requested {rate} Hz not in available rates: {avail:?}"
-        )
-        .into());
+        return Err(format!("Requested {rate} Hz not in available rates: {avail:?}").into());
     }
 
     write_sample_rate(device, channels, channel_type, rate)
@@ -654,9 +694,7 @@ fn set_sample_rate_max(
 ) {
     let avail = read_sample_rates_available(device, channels, &channel_type);
     let rate = if avail.is_empty() {
-        log::warn!(
-            "No available sample rates reported, using default {DEFAULT_SAMPLE_RATE} Hz"
-        );
+        log::warn!("No available sample rates reported, using default {DEFAULT_SAMPLE_RATE} Hz");
         DEFAULT_SAMPLE_RATE
     } else {
         let max = avail.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -691,9 +729,7 @@ fn write_sample_rate(
                 return Ok(());
             }
             Err(err) => {
-                log::warn!(
-                    "Per-channel sampling_frequency write failed for {id}: {err}"
-                );
+                log::warn!("Per-channel sampling_frequency write failed for {id}: {err}");
             }
         }
     }
@@ -707,9 +743,7 @@ fn write_sample_rate(
     device.attr_write_float(attr, rate)?;
     match device.attr_read_float(attr) {
         Ok(actual) => log::info!("Set device-level {attr} to {actual} Hz"),
-        Err(err) => log::warn!(
-            "Set {attr} but read-back failed: {err}, assuming {rate} Hz"
-        ),
+        Err(err) => log::warn!("Set {attr} but read-back failed: {err}, assuming {rate} Hz"),
     }
     Ok(())
 }
@@ -750,4 +784,30 @@ fn read_sample_rates_available(
     }
 
     vec![]
+}
+
+#[cfg(test)]
+mod buffer_error_tests {
+    use super::{is_retryable_refill_errno, is_retryable_refill_error};
+
+    #[test]
+    fn only_transient_refill_errors_are_retried() {
+        assert!(is_retryable_refill_errno(nix::libc::EAGAIN));
+        assert!(is_retryable_refill_errno(nix::libc::EINTR));
+        assert!(!is_retryable_refill_errno(nix::libc::ENODEV));
+        assert!(!is_retryable_refill_errno(nix::libc::EIO));
+        assert!(!is_retryable_refill_errno(nix::libc::EBADF));
+        assert!(is_retryable_refill_error(
+            &std::io::Error::from(std::io::ErrorKind::WouldBlock).into()
+        ));
+        assert!(is_retryable_refill_error(
+            &std::io::Error::from(std::io::ErrorKind::Interrupted).into()
+        ));
+        assert!(!is_retryable_refill_error(
+            &std::io::Error::from_raw_os_error(nix::libc::ENODEV).into()
+        ));
+        assert!(!is_retryable_refill_error(&industrial_io::Error::General(
+            "device failure".into()
+        )));
+    }
 }
