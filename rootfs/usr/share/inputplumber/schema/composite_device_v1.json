@@ -432,6 +432,14 @@
         "name": {
           "type": "string"
         },
+        "sample_rate": {
+          "description": "Desired IIO sampling rate in Hz.",
+          "type": "number"
+        },
+        "use_buffer": {
+          "description": "Try IIO buffer mode when available. Defaults to true; false forces sysfs polling.",
+          "type": "boolean"
+        },
         "mount_matrix": {
           "$ref": "#/definitions/MountMatrix"
         }

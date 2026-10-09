@@ -17,5 +17,7 @@ pub enum SourceCommand {
     EraseEffect(i16, Sender<Result<(), Box<dyn Error + Send + Sync>>>),
     GetEventFilter(Sender<Vec<Capability>>),
     SetEventFilter(Vec<Capability>),
+    Suspend,
+    Resume,
     Stop,
 }

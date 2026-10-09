@@ -167,3 +167,40 @@ fn required_keys_config_accepts_new_and_legacy_profiles() {
     let legacy: super::Evdev = serde_yaml::from_str("name: keyboard").unwrap();
     assert!(legacy.required_keys.is_none());
 }
+
+#[test]
+fn iio_buffer_options_and_msi_sfh_policy_are_preserved() {
+    let default: super::IIO = serde_yaml::from_str("name: accel_3d").unwrap();
+    assert_eq!(default.use_buffer, None);
+    let configured: super::IIO =
+        serde_yaml::from_str("name: accel_3d\nuse_buffer: false\nsample_rate: 100.0").unwrap();
+    assert_eq!(configured.use_buffer, Some(false));
+    assert_eq!(configured.sample_rate, Some(100.0));
+
+    let claw = CompositeDeviceConfig::from_yaml(
+        include_str!("../../rootfs/usr/share/inputplumber/devices/50-msi_claw_a8_bz2e.yaml")
+            .to_string(),
+    )
+    .unwrap();
+    let sensors: Vec<_> = claw
+        .source_devices
+        .iter()
+        .filter_map(|source| source.iio.as_ref())
+        .collect();
+    assert_eq!(sensors.len(), 2);
+    for sensor in sensors {
+        assert_eq!(sensor.use_buffer, Some(false));
+        assert!(matches!(
+            sensor.name.as_deref(),
+            Some("accel_3d" | "gyro_3d")
+        ));
+    }
+
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../rootfs/usr/share/inputplumber/schema/composite_device_v1.json"
+    ))
+    .unwrap();
+    let properties = &schema["definitions"]["IIO"]["properties"];
+    assert_eq!(properties["use_buffer"]["type"], "boolean");
+    assert_eq!(properties["sample_rate"]["type"], "number");
+}
