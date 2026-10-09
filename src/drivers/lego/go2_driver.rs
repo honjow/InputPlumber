@@ -161,8 +161,16 @@ impl Driver {
 
     /// Translate the state into individual events
     fn translate_xinput(&mut self, old_state: Option<XInputDataReport>) -> Vec<Event> {
+        Self::translate_xinput_state(self.state, old_state, &self.filtered_events)
+    }
+
+    fn translate_xinput_state(
+        state: Option<XInputDataReport>,
+        old_state: Option<XInputDataReport>,
+        filtered_events: &HashSet<Capability>,
+    ) -> Vec<Event> {
         let mut events = Vec::new();
-        let Some(state) = self.state else {
+        let Some(state) = state else {
             return events;
         };
 
@@ -409,35 +417,29 @@ impl Driver {
                 log::trace!("Left controller connected state: {:?}", state.l_con_state);
                 log::trace!("Right controller connected state: {:?}", state.r_con_state);
             }
-            if !self
-                .filtered_events
-                .contains(&Capability::Accelerometer(Source::Left))
+            if !filtered_events.contains(&Capability::Accelerometer(Source::Left))
                 && (state.left_accel_x != old_state.left_accel_x
                     || state.left_accel_y != old_state.left_accel_y
                     || state.left_accel_z != old_state.left_accel_z)
             {
                 events.push(Event::Axis(AxisEvent::LeftAccel(ImuAxisInput {
                     pitch: -state.left_accel_x,
-                    roll: state.left_accel_y,
-                    yaw: state.left_accel_z,
+                    roll: -state.left_accel_y,
+                    yaw: -state.left_accel_z,
                 })))
             }
-            if !self
-                .filtered_events
-                .contains(&Capability::Accelerometer(Source::Right))
+            if !filtered_events.contains(&Capability::Accelerometer(Source::Right))
                 && (state.right_accel_x != old_state.right_accel_x
                     || state.right_accel_y != old_state.right_accel_y
                     || state.right_accel_z != old_state.right_accel_z)
             {
                 events.push(Event::Axis(AxisEvent::RightAccel(ImuAxisInput {
                     pitch: -state.right_accel_x,
-                    roll: -state.right_accel_y,
-                    yaw: state.right_accel_z,
+                    roll: state.right_accel_y,
+                    yaw: -state.right_accel_z,
                 })))
             }
-            if !self
-                .filtered_events
-                .contains(&Capability::Accelerometer(Source::Center))
+            if !filtered_events.contains(&Capability::Accelerometer(Source::Center))
                 && (state.left_accel_x != old_state.left_accel_x
                     || state.left_accel_y != old_state.left_accel_y
                     || state.left_accel_z != old_state.left_accel_z
@@ -447,26 +449,22 @@ impl Driver {
             {
                 events.push(Event::Axis(AxisEvent::MultiAccel(ImuAxisInput {
                     pitch: -(state.left_accel_x + state.right_accel_x) / 2,
-                    roll: (state.left_accel_y + state.right_accel_y) / 2,
-                    yaw: (state.left_accel_z + state.right_accel_z) / 2,
+                    roll: (-state.left_accel_y + state.right_accel_y) / 2,
+                    yaw: -(state.left_accel_z + state.right_accel_z) / 2,
                 })))
             }
-            if !self
-                .filtered_events
-                .contains(&Capability::Gyroscope(Source::Left))
+            if !filtered_events.contains(&Capability::Gyroscope(Source::Left))
                 && (state.left_gyro_x != old_state.left_gyro_x
                     || state.left_gyro_y != old_state.left_gyro_y
                     || state.left_gyro_z != old_state.left_gyro_z)
             {
                 events.push(Event::Axis(AxisEvent::LeftGyro(ImuAxisInput {
                     pitch: -state.left_gyro_x,
-                    roll: state.left_gyro_y,
-                    yaw: state.left_gyro_z,
+                    roll: -state.left_gyro_y,
+                    yaw: -state.left_gyro_z,
                 })))
             }
-            if !self
-                .filtered_events
-                .contains(&Capability::Gyroscope(Source::Right))
+            if !filtered_events.contains(&Capability::Gyroscope(Source::Right))
                 && (state.right_gyro_x != old_state.right_gyro_x
                     || state.right_gyro_y != old_state.right_gyro_y
                     || state.right_gyro_z != old_state.right_gyro_z)
@@ -474,13 +472,11 @@ impl Driver {
                 events.push(Event::Axis(AxisEvent::RightGyro(ImuAxisInput {
                     pitch: -state.right_gyro_x,
                     roll: state.right_gyro_y,
-                    yaw: state.right_gyro_z,
+                    yaw: -state.right_gyro_z,
                 })))
             }
 
-            if !self
-                .filtered_events
-                .contains(&Capability::Gyroscope(Source::Center))
+            if !filtered_events.contains(&Capability::Gyroscope(Source::Center))
                 && (state.left_gyro_x != old_state.left_gyro_x
                     || state.left_gyro_y != old_state.left_gyro_y
                     || state.left_gyro_z != old_state.left_gyro_z
@@ -490,11 +486,73 @@ impl Driver {
             {
                 events.push(Event::Axis(AxisEvent::MultiGyro(ImuAxisInput {
                     pitch: -(state.left_gyro_x + state.right_gyro_x) / 2,
-                    roll: (state.left_gyro_y + state.right_gyro_y) / 2,
-                    yaw: (state.left_gyro_z + state.right_gyro_z) / 2,
+                    roll: (-state.left_gyro_y + state.right_gyro_y) / 2,
+                    yaw: -(state.left_gyro_z + state.right_gyro_z) / 2,
                 })))
             }
         }
         events
+    }
+}
+
+#[cfg(test)]
+mod imu_tests {
+    use super::*;
+
+    #[test]
+    fn go2_left_right_and_center_imu_signs() {
+        let old = XInputDataReport::unpack(&[0; XINPUT_PACKET_SIZE]).unwrap();
+        let mut state = old;
+        state.left_accel_x = 100;
+        state.left_accel_y = 200;
+        state.left_accel_z = 300;
+        state.right_accel_x = 400;
+        state.right_accel_y = 500;
+        state.right_accel_z = 600;
+        state.left_gyro_x = 10;
+        state.left_gyro_y = 20;
+        state.left_gyro_z = 30;
+        state.right_gyro_x = 40;
+        state.right_gyro_y = 50;
+        state.right_gyro_z = 60;
+        let events = Driver::translate_xinput_state(Some(state), Some(old), &HashSet::new());
+        let vectors: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Axis(axis) => {
+                    let (name, vector) = match axis {
+                        AxisEvent::LeftAccel(v) => ("left_accel", v),
+                        AxisEvent::RightAccel(v) => ("right_accel", v),
+                        AxisEvent::MultiAccel(v) => ("center_accel", v),
+                        AxisEvent::LeftGyro(v) => ("left_gyro", v),
+                        AxisEvent::RightGyro(v) => ("right_gyro", v),
+                        AxisEvent::MultiGyro(v) => ("center_gyro", v),
+                        _ => return None,
+                    };
+                    Some((name, vector.pitch, vector.roll, vector.yaw))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            vectors,
+            vec![
+                ("left_accel", -100, -200, -300),
+                ("right_accel", -400, 500, -600),
+                ("center_accel", -250, 150, -450),
+                ("left_gyro", -10, -20, -30),
+                ("right_gyro", -40, 50, -60),
+                ("center_gyro", -25, 15, -45),
+            ]
+        );
+        let filter = HashSet::from([
+            Capability::Accelerometer(Source::Left),
+            Capability::Accelerometer(Source::Right),
+            Capability::Accelerometer(Source::Center),
+            Capability::Gyroscope(Source::Left),
+            Capability::Gyroscope(Source::Right),
+            Capability::Gyroscope(Source::Center),
+        ]);
+        assert!(Driver::translate_xinput_state(Some(state), Some(old), &filter).is_empty());
     }
 }

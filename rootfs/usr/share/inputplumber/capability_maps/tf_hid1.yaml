@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/ShadowBlip/InputPlumber/main/rootfs/usr/share/inputplumber/schema/capability_map_v2.json
+# Schema version number
+version: 2
+kind: CapabilityMap
+name: Terrans Force HID Buttons
+id: tf_hid1
+
+mapping:
+  - name: Quick Access
+    source_events:
+      - hidraw:
+          input_type: button
+          byte_start: 9
+    target_event:
+      gamepad:
+        button: QuickAccess
+
+

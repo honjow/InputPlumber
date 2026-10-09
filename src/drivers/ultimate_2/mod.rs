@@ -15,5 +15,7 @@ pub const TRIGGER_AXIS_MAX: f64 = 255.0;
 // Accel scale: 4096 raw units = 1G (derived from SDL_hidapi_8bitdo.c)
 pub const ACCEL_SCALE: f64 = 4096.0;
 
+// The physical controller uses report 0x01; the virtual target advertises 0x04.
 pub const REPORT_ID_INPUT: u8 = 0x01;
+pub const REPORT_ID_TARGET_INPUT: u8 = 0x04;
 pub const REPORT_ID_RUMBLE: u8 = 0x05;
