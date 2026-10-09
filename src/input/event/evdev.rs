@@ -117,8 +117,12 @@ impl EvdevEvent {
         if let Some(info) = self.abs_info {
             let code = self.event.code();
             match AbsoluteAxisCode(code) {
-                AbsoluteAxisCode::ABS_Z => normalize_unsigned_value(raw_value, info.minimum(), info.maximum()),
-                AbsoluteAxisCode::ABS_RZ => normalize_unsigned_value(raw_value, info.minimum(), info.maximum()),
+                AbsoluteAxisCode::ABS_Z => {
+                    normalize_unsigned_value(raw_value, info.minimum(), info.maximum())
+                }
+                AbsoluteAxisCode::ABS_RZ => {
+                    normalize_unsigned_value(raw_value, info.minimum(), info.maximum())
+                }
                 _ => normalize_signed_value(raw_value, info.minimum(), info.maximum()),
             }
         } else {
@@ -912,6 +916,7 @@ fn event_codes_from_capability(capability: Capability) -> Vec<u16> {
                     TouchButton::Touch => vec![KeyCode::BTN_TOUCH.0],
                     TouchButton::Press => vec![KeyCode::BTN_LEFT.0],
                 },
+                Touch::Gesture(_) => vec![],
             },
             Touchpad::RightPad(action) => match action {
                 Touch::Motion => vec![
@@ -922,6 +927,7 @@ fn event_codes_from_capability(capability: Capability) -> Vec<u16> {
                     TouchButton::Touch => vec![KeyCode::BTN_TOUCH.0],
                     TouchButton::Press => vec![KeyCode::BTN_LEFT.0],
                 },
+                Touch::Gesture(_) => vec![],
             },
             Touchpad::CenterPad(action) => match action {
                 Touch::Motion => vec![
@@ -932,6 +938,7 @@ fn event_codes_from_capability(capability: Capability) -> Vec<u16> {
                     TouchButton::Touch => vec![KeyCode::BTN_TOUCH.0],
                     TouchButton::Press => vec![KeyCode::BTN_LEFT.0],
                 },
+                Touch::Gesture(_) => vec![],
             },
         },
         Capability::Touchscreen(touch) => match touch {
@@ -943,6 +950,7 @@ fn event_codes_from_capability(capability: Capability) -> Vec<u16> {
                 TouchButton::Touch => vec![KeyCode::BTN_TOUCH.0],
                 TouchButton::Press => vec![KeyCode::BTN_LEFT.0],
             },
+            Touch::Gesture(_) => vec![],
         },
         Capability::Gyroscope(_) => vec![],
         Capability::Accelerometer(_) => vec![],
