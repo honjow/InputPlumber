@@ -710,11 +710,16 @@ impl HidRawDevice {
     /// Return the driver type for the given vendor and product
     fn get_driver_type(device: &UdevDevice, is_blocked: bool) -> DriverType {
         log::debug!("Finding driver for interface: {:?}", device);
+        if is_blocked {
+            return DriverType::Blocked;
+        }
         Self::get_driver_type_for_interface(
             device.id_vendor(),
             device.id_product(),
             device.interface_number(),
             &device.name(),
+            &device.drivers(),
+            &device.syspath(),
             is_blocked,
         )
     }
@@ -724,6 +729,8 @@ impl HidRawDevice {
         pid: u16,
         iid: i32,
         name: &str,
+        kernel_drivers: &[String],
+        syspath: &str,
         is_blocked: bool,
     ) -> DriverType {
         if is_blocked {
@@ -816,7 +823,7 @@ impl HidRawDevice {
         // VID/PID, so it must be positively identified by device name.
         if vid == drivers::opineo::VID
             && pid == drivers::opineo::PID
-            && (device.name().starts_with("OPI000") || device.name().starts_with("SYNA3602"))
+            && (name.starts_with("OPI000") || name.starts_with("SYNA3602"))
         {
             log::info!("Detected OrangePi NEO Touchpad");
 
@@ -836,9 +843,7 @@ impl HidRawDevice {
         }
 
         // XpadUhid
-        let drivers = device.drivers();
-        if drivers.contains(&"microsoft".to_string()) {
-            let syspath = device.syspath();
+        if kernel_drivers.iter().any(|driver| driver == "microsoft") {
             if syspath.contains("uhid") {
                 log::info!("Detected UHID XPAD");
                 return DriverType::XpadUhid;
@@ -924,7 +929,9 @@ mod dispatch_tests {
 
     #[test]
     fn gpd_and_generic_interfaces_remain_distinct() {
-        let driver = HidRawDevice::get_driver_type_for_interface;
+        let driver = |vid, pid, iid, name, blocked| {
+            HidRawDevice::get_driver_type_for_interface(vid, pid, iid, name, &[], "", blocked)
+        };
         assert_eq!(
             driver(0x2f24, 0x0135, 1, "", false),
             DriverType::GpdMacroKeyboard
@@ -932,5 +939,49 @@ mod dispatch_tests {
         assert_eq!(driver(0x2f24, 0x0135, 3, "", false), DriverType::Unknown);
         assert_eq!(driver(0x2f24, 0x0137, 0, "", false), DriverType::Unknown);
         assert_eq!(driver(0x2f24, 0x0137, 0, "", true), DriverType::Blocked);
+    }
+}
+
+#[cfg(test)]
+mod upstream_dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn shared_touchpad_ids_still_use_device_name() {
+        let driver = |name| {
+            HidRawDevice::get_driver_type_for_interface(
+                drivers::opineo::VID,
+                drivers::opineo::PID,
+                0,
+                name,
+                &[],
+                "",
+                false,
+            )
+        };
+        assert_eq!(driver("OPI0001"), DriverType::OrangePiNeoTouchpad);
+        assert_eq!(driver("SYNA3602"), DriverType::OrangePiNeoTouchpad);
+        assert_eq!(
+            driver(drivers::gpd_device::TOUCHPAD_2024_DEVICE_NAME_PREFIX),
+            DriverType::GpdTouchpad2024
+        );
+    }
+
+    #[test]
+    fn xpad_uhid_still_requires_kernel_driver_and_path() {
+        let drivers = vec!["microsoft".to_string()];
+        let driver = HidRawDevice::get_driver_type_for_interface;
+        assert_eq!(
+            driver(0, 0, 0, "", &drivers, "/sys/devices/virtual/uhid", false),
+            DriverType::XpadUhid
+        );
+        assert_eq!(
+            driver(0, 0, 0, "", &drivers, "/sys/devices/usb", false),
+            DriverType::Unknown
+        );
+        assert_eq!(
+            driver(0, 0, 0, "", &[], "/sys/devices/virtual/uhid", false),
+            DriverType::Unknown
+        );
     }
 }
