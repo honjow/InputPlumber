@@ -241,3 +241,25 @@ async fn source_refreshes_poll_descriptors_after_resume() {
         .unwrap()
         .unwrap();
 }
+
+#[test]
+fn source_poll_rejects_terminal_events_even_when_input_is_ready() {
+    use nix::poll::PollFlags;
+    for event in [PollFlags::POLLERR, PollFlags::POLLHUP, PollFlags::POLLNVAL] {
+        assert!(super::check_poll_events(Some(event)).is_err());
+        assert!(super::check_poll_events(Some(event | PollFlags::POLLIN)).is_err());
+    }
+    assert!(super::check_poll_events(None).is_err());
+    assert!(super::check_poll_events(Some(PollFlags::empty())).is_ok());
+    assert!(super::check_poll_events(Some(PollFlags::POLLIN)).is_ok());
+}
+
+#[test]
+fn disconnected_socket_stops_fd_polling() {
+    use nix::poll::{PollFd, PollFlags};
+    use std::os::{fd::AsFd, unix::net::UnixStream};
+    let (reader, writer) = UnixStream::pair().unwrap();
+    drop(writer);
+    let mut descriptors = [PollFd::new(reader.as_fd(), PollFlags::POLLIN)];
+    assert!(super::poll_source_fds(&mut descriptors, 50).is_err());
+}

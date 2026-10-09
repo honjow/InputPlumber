@@ -61,6 +61,32 @@ fn fd_poll_timeout(poll_rate: Duration, elapsed: Duration) -> u16 {
         .min(u16::MAX as u128) as u16
 }
 
+/// Stop a disconnected or invalid fd source instead of repeatedly polling an
+/// immediately-ready error condition. EINTR remains a normal retry on the next loop.
+fn poll_source_fds(fds: &mut [nix::poll::PollFd<'_>], timeout_ms: u16) -> Result<(), InputError> {
+    match nix::poll::poll(fds, timeout_ms) {
+        Ok(_) => {
+            for fd in fds {
+                check_poll_events(fd.revents())?;
+            }
+            Ok(())
+        }
+        Err(nix::errno::Errno::EINTR) => Ok(()),
+        Err(error) => Err(format!("Failed to wait for source input: {error}").into()),
+    }
+}
+
+fn check_poll_events(events: Option<nix::poll::PollFlags>) -> Result<(), InputError> {
+    use nix::poll::PollFlags;
+    let Some(events) = events else {
+        return Err("Unexpected source poll event flags".into());
+    };
+    if events.intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL) {
+        return Err(format!("Source fd is no longer readable: {events:?}").into());
+    }
+    Ok(())
+}
+
 /// Possible errors for a source device client
 #[derive(Error, Debug)]
 pub enum InputError {
@@ -508,12 +534,8 @@ impl<T: SourceInputDevice + SourceOutputDevice + Send + 'static> SourceDriver<T>
                             })
                             .collect();
                         let timeout_ms = fd_poll_timeout(self.options.poll_rate, poll_time);
-                        match nix::poll::poll(&mut pollfds, timeout_ms) {
-                            Ok(_) | Err(nix::errno::Errno::EINTR) => {}
-                            Err(e) => {
-                                log::warn!("Poll error for {device_id}: {e}");
-                            }
-                        }
+                        poll_source_fds(&mut pollfds, timeout_ms)
+                            .map_err(|error| format!("Poll error for {device_id}: {error}"))?;
                     } else if let Some(remaining) = self.options.poll_rate.checked_sub(poll_time) {
                         // Preserve upstream time compensation for fixed-rate and blocking
                         // hidraw implementations (including a zero poll rate).
