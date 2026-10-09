@@ -12,7 +12,7 @@ use std::{
     collections::HashMap,
     error::Error,
     fs,
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{LazyLock, Mutex},
 };
@@ -26,7 +26,32 @@ const RULE_HIDE_DEVICE_EARLY_PRIORITY: &str = "50";
 const RULE_HIDE_DEVICE_LATE_PRIORITY: &str = "96";
 const RULES_PREFIX: &str = "/run/udev/rules.d";
 
-static SAVED_PERMISSIONS: LazyLock<Mutex<HashMap<String, u32>>> =
+#[derive(Clone, Copy)]
+struct SavedPermissions {
+    mode: u32,
+    device: u64,
+    inode: u64,
+    rdev: u64,
+}
+
+impl SavedPermissions {
+    fn from_metadata(metadata: &fs::Metadata, mode: u32) -> Self {
+        Self {
+            mode,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            rdev: metadata.rdev(),
+        }
+    }
+
+    fn matches(&self, metadata: &fs::Metadata) -> bool {
+        self.device == metadata.dev()
+            && self.inode == metadata.ino()
+            && self.rdev == metadata.rdev()
+    }
+}
+
+static SAVED_PERMISSIONS: LazyLock<Mutex<HashMap<String, SavedPermissions>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// HideFlags can be used to change the behavior of how devices are hidden.
@@ -59,9 +84,10 @@ pub async fn hide_device(path: &str, flags: &[HideFlag]) -> Result<(), Box<dyn E
         let mode = metadata.permissions().mode() & 0o7777;
         if mode != 0 {
             if let Ok(mut saved) = SAVED_PERMISSIONS.lock() {
-                saved.insert(dst_path.clone(), mode);
+                let permissions = SavedPermissions::from_metadata(&metadata, mode);
+                saved.insert(dst_path.clone(), permissions);
                 if path != dst_path {
-                    saved.insert(path.to_string(), mode);
+                    saved.insert(path.to_string(), permissions);
                 }
             }
         }
@@ -331,14 +357,26 @@ fn restore_saved_permissions(path: &str) {
         log::warn!("Unable to access saved permissions while restoring {path}");
         return;
     };
-    let Some(&mode) = saved.get(path) else {
+    let Some(&record) = saved.get(path) else {
         return;
     };
-    let result = fs::metadata(path).and_then(|metadata| {
-        let mut permissions = metadata.permissions();
-        permissions.set_mode(mode);
-        fs::set_permissions(path, permissions)
-    });
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            log::warn!("Failed reading saved node {path}: {error}");
+            return;
+        }
+    };
+    // Node names can be reused after hot unplug. A retry must never transfer
+    // the previous device's permissions to its replacement.
+    if !record.matches(&metadata) {
+        log::warn!("Not restoring permissions for replaced node {path}");
+        saved.remove(path);
+        return;
+    }
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(record.mode);
+    let result = fs::set_permissions(path, permissions);
     match result {
         Ok(()) => {
             saved.remove(path);
