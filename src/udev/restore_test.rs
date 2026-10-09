@@ -24,7 +24,7 @@ impl TestNode {
     }
     fn create_hidden(&self) {
         fs::write(&self.0, []).unwrap();
-        fs::set_permissions(&self.0, fs::Permissions::from_mode(0)).unwrap();
+        fs::set_permissions(&self.0, fs::Permissions::from_mode(0o0)).unwrap();
     }
     fn record(&self, mode: u32) {
         SAVED_PERMISSIONS.lock().unwrap().insert(
