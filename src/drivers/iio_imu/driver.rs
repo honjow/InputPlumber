@@ -265,9 +265,14 @@ impl Driver {
             unreachable!();
         };
 
-        if let Err(e) = buffer.refill() {
-            log::trace!("Buffer refill: {e}");
-            return Ok(vec![]);
+        if let Err(error) = buffer.refill() {
+            if is_retryable_refill_error(&error) {
+                log::trace!("Buffer refill not ready: {error}");
+                return Ok(vec![]);
+            }
+            // A permanent device failure must reach the source owner rather than
+            // leave an apparently-live sensor that silently produces no samples.
+            return Err(error.into());
         }
 
         let mut events = vec![];
@@ -394,6 +399,23 @@ impl Driver {
     fn rotate_value(&self, value: &mut AxisData) {
         rotate_value(&self.mount_matrix, value);
     }
+}
+
+fn is_retryable_refill_error(error: &industrial_io::Error) -> bool {
+    match error {
+        industrial_io::Error::Io(error) => matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+        ),
+        // industrial-io currently uses a different nix version. Compare its
+        // OS errno value, not version-specific enum variants.
+        industrial_io::Error::Nix(error) => is_retryable_refill_errno(*error as i32),
+        _ => false,
+    }
+}
+
+fn is_retryable_refill_errno(errno: i32) -> bool {
+    matches!(errno, nix::libc::EAGAIN | nix::libc::EINTR)
 }
 
 fn rotate_value(m: &MountMatrix, value: &mut AxisData) {
@@ -762,4 +784,30 @@ fn read_sample_rates_available(
     }
 
     vec![]
+}
+
+#[cfg(test)]
+mod buffer_error_tests {
+    use super::{is_retryable_refill_errno, is_retryable_refill_error};
+
+    #[test]
+    fn only_transient_refill_errors_are_retried() {
+        assert!(is_retryable_refill_errno(nix::libc::EAGAIN));
+        assert!(is_retryable_refill_errno(nix::libc::EINTR));
+        assert!(!is_retryable_refill_errno(nix::libc::ENODEV));
+        assert!(!is_retryable_refill_errno(nix::libc::EIO));
+        assert!(!is_retryable_refill_errno(nix::libc::EBADF));
+        assert!(is_retryable_refill_error(
+            &std::io::Error::from(std::io::ErrorKind::WouldBlock).into()
+        ));
+        assert!(is_retryable_refill_error(
+            &std::io::Error::from(std::io::ErrorKind::Interrupted).into()
+        ));
+        assert!(!is_retryable_refill_error(
+            &std::io::Error::from_raw_os_error(nix::libc::ENODEV).into()
+        ));
+        assert!(!is_retryable_refill_error(&industrial_io::Error::General(
+            "device failure".into()
+        )));
+    }
 }
