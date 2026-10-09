@@ -1244,19 +1244,23 @@ impl InputValue {
                 Touchpad::LeftPad(touch) => match touch {
                     Touch::Motion => Err(TranslationError::NotImplemented),
                     Touch::Button(_) => Ok(self.clone()),
+                    Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                 },
                 Touchpad::RightPad(touch) => match touch {
                     Touch::Motion => Err(TranslationError::NotImplemented),
                     Touch::Button(_) => Ok(self.clone()),
+                    Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                 },
                 Touchpad::CenterPad(touch) => match touch {
                     Touch::Motion => Err(TranslationError::NotImplemented),
                     Touch::Button(_) => Ok(self.clone()),
+                    Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                 },
             },
             Capability::Touchscreen(touch) => match touch {
                 Touch::Motion => Err(TranslationError::NotImplemented),
                 Touch::Button(_) => Ok(self.clone()),
+                Touch::Gesture(_) => Err(TranslationError::NotImplemented),
             },
             Capability::Gyroscope(_) => Err(TranslationError::NotImplemented),
             Capability::Accelerometer(_) => Err(TranslationError::NotImplemented),
