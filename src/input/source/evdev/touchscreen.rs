@@ -707,17 +707,17 @@ mod tests {
 
     fn frame(state: &mut TouchscreenState, x: i32, y: i32) -> Vec<NativeEvent> {
         state.translate(InputEvent::new(
-            EventType::ABSOLUTE,
+            EventType::ABSOLUTE.0,
             AbsoluteAxisCode::ABS_MT_POSITION_X.0,
             x,
         ));
         state.translate(InputEvent::new(
-            EventType::ABSOLUTE,
+            EventType::ABSOLUTE.0,
             AbsoluteAxisCode::ABS_MT_POSITION_Y.0,
             y,
         ));
         state.translate(InputEvent::new(
-            EventType::SYNCHRONIZATION,
+            EventType::SYNCHRONIZATION.0,
             SynchronizationCode::SYN_REPORT.0,
             0,
         ))
@@ -775,7 +775,7 @@ mod tests {
         let mut state = touchscreen(Orientation::Normal, true);
         assert!(frame(&mut state, 0, 500).is_empty());
         let events = state.translate(InputEvent::new(
-            EventType::ABSOLUTE,
+            EventType::ABSOLUTE.0,
             AbsoluteAxisCode::ABS_MT_TRACKING_ID.0,
             -1,
         ));
@@ -797,12 +797,12 @@ mod tests {
         let mut state = touchscreen(Orientation::Normal, true);
         frame(&mut state, 0, 500);
         state.translate(InputEvent::new(
-            EventType::ABSOLUTE,
+            EventType::ABSOLUTE.0,
             AbsoluteAxisCode::ABS_MT_SLOT.0,
             1,
         ));
         state.translate(InputEvent::new(
-            EventType::ABSOLUTE,
+            EventType::ABSOLUTE.0,
             AbsoluteAxisCode::ABS_MT_SLOT.0,
             0,
         ));
