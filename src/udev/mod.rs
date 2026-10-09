@@ -3,6 +3,8 @@
 
 #[cfg(test)]
 pub mod device_test;
+#[cfg(test)]
+mod restore_test;
 
 pub mod device;
 
@@ -159,11 +161,25 @@ LABEL="inputplumber_end"
 
 /// Unhide the given device
 pub async fn unhide_device(path: String) -> Result<(), Box<dyn Error>> {
-    // Get the device to unhide
-    let device = get_device(path.clone()).await?;
-    let name = device.name.as_str();
-    let Some(parent) = device.get_parent() else {
-        return Err("Unable to determine parent for device".into());
+    // A disappearing device or unavailable udev must not prevent restoring a
+    // node whose original permissions we recorded. Never guess permissions for
+    // arbitrary mode-000 nodes: other managers may deliberately own them.
+    let device = match get_device(path.clone()).await {
+        Ok(device) => Some(device),
+        Err(error) => {
+            log::warn!("Failed to query udev data for {path}: {error}");
+            None
+        }
+    };
+    let parent = device.as_ref().and_then(Device::get_parent);
+    let name = device
+        .as_ref()
+        .map(|device| device.name.as_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .or_else(|| tracked_device_name(&path));
+    let Some(name) = name else {
+        return Err("Unable to identify an InputPlumber-managed device to restore".into());
     };
 
     // Remove all created udev rules
@@ -197,20 +213,20 @@ pub async fn unhide_device(path: String) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    let saved_mode = SAVED_PERMISSIONS
-        .lock()
-        .ok()
-        .and_then(|mut m| m.remove(&dst_path).or_else(|| m.remove(&path)));
-    if let Some(mode) = saved_mode {
-        if let Ok(metadata) = fs::metadata(&dst_path) {
-            let mut permissions = metadata.permissions();
-            permissions.set_mode(mode);
-            let _ = fs::set_permissions(&dst_path, permissions);
-        }
+    restore_saved_permissions(&dst_path);
+    if path != dst_path {
+        restore_saved_permissions(&path);
     }
 
-    // Reload udev
-    reload_children(parent).await?;
+    // Continue best-effort cleanup even if udev lost the parent during unplug.
+    let reload = if let Some(parent) = parent {
+        reload_children(parent).await
+    } else {
+        reload_all().await
+    };
+    if let Err(error) = reload {
+        log::warn!("Failed reloading udev after unhiding {name}: {error}");
+    }
 
     Ok(())
 }
@@ -236,17 +252,7 @@ pub async fn unhide_all() -> Result<(), Box<dyn Error>> {
                 let symlink_path = entry.path();
                 if let Ok(target) = fs::canonicalize(&symlink_path) {
                     let target_str = target.to_string_lossy().to_string();
-                    let saved_mode = SAVED_PERMISSIONS
-                        .lock()
-                        .ok()
-                        .and_then(|mut m| m.remove(&target_str));
-                    if let Some(mode) = saved_mode {
-                        if let Ok(metadata) = fs::metadata(&target) {
-                            let mut permissions = metadata.permissions();
-                            permissions.set_mode(mode);
-                            let _ = fs::set_permissions(&target, permissions);
-                        }
-                    }
+                    restore_saved_permissions(&target_str);
                 }
                 let _ = fs::remove_file(symlink_path);
             }
@@ -270,32 +276,75 @@ pub async fn unhide_all() -> Result<(), Box<dyn Error>> {
                 if let Err(e) = fs::rename(&path, &dst_path) {
                     log::warn!("Failed to move device node from {path:?} to {dst_path}: {e}");
                 }
-                let saved_mode = SAVED_PERMISSIONS
-                    .lock()
-                    .ok()
-                    .and_then(|mut m| m.remove(&dst_path));
-                if let Some(mode) = saved_mode {
-                    if let Ok(metadata) = fs::metadata(&dst_path) {
-                        let mut permissions = metadata.permissions();
-                        permissions.set_mode(mode);
-                        let _ = fs::set_permissions(&dst_path, permissions);
-                    }
-                }
+                restore_saved_permissions(&dst_path);
             }
         }
         let _ = fs::remove_dir("/dev/inputplumber/sources");
     }
 
-    if let Ok(mut saved) = SAVED_PERMISSIONS.lock() {
-        saved.clear();
+    // A hide rule or symlink may already be missing. Recover only paths that
+    // this process recorded, and keep failed entries available for a retry.
+    let remaining: Vec<String> = SAVED_PERMISSIONS
+        .lock()
+        .map(|saved| saved.keys().cloned().collect())
+        .unwrap_or_default();
+    for path in remaining {
+        restore_saved_permissions(&path);
     }
 
     let _ = fs::remove_dir("/dev/inputplumber");
 
-    // Reload udev rules
-    reload_all().await?;
+    if let Err(error) = reload_all().await {
+        log::warn!("Failed reloading udev while unhiding all devices: {error}");
+    }
 
     Ok(())
+}
+
+/// Recover a name only when InputPlumber has an explicit ownership record.
+fn tracked_device_name(path: &str) -> Option<String> {
+    let name = Path::new(path).file_name()?.to_str()?;
+    let suffix = name
+        .strip_prefix("event")
+        .or_else(|| name.strip_prefix("js"))
+        .or_else(|| name.strip_prefix("hidraw"))?;
+    if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let tracked = SAVED_PERMISSIONS
+        .lock()
+        .map(|saved| saved.contains_key(path))
+        .unwrap_or(false);
+    let hidden_link = Path::new("/dev/inputplumber/by-hidden").join(name);
+    let moved_node = Path::new("/dev/inputplumber/sources").join(name);
+    if tracked || hidden_link.symlink_metadata().is_ok() || moved_node.exists() {
+        Some(name.to_owned())
+    } else {
+        None
+    }
+}
+
+/// Restore the exact mode recorded before hiding, without a global scan or
+/// broad fallback chmod/chgrp/ACL reset. Failed restores retain their record.
+fn restore_saved_permissions(path: &str) {
+    let Ok(mut saved) = SAVED_PERMISSIONS.lock() else {
+        log::warn!("Unable to access saved permissions while restoring {path}");
+        return;
+    };
+    let Some(&mode) = saved.get(path) else {
+        return;
+    };
+    let result = fs::metadata(path).and_then(|metadata| {
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(mode);
+        fs::set_permissions(path, permissions)
+    });
+    match result {
+        Ok(()) => {
+            saved.remove(path);
+        }
+        Err(error) => log::warn!("Failed restoring saved permissions for {path}: {error}"),
+    }
 }
 
 /// Trigger udev to evaluate rules on the children of the given parent device path
@@ -327,7 +376,9 @@ async fn reload_all() -> Result<(), Box<dyn Error>> {
 
     for action in ["remove", "add"] {
         for subsystem in ["input", "hidraw"] {
-            log::debug!("Retriggering udev rules: udevadm trigger --action {action} -s {subsystem}");
+            log::debug!(
+                "Retriggering udev rules: udevadm trigger --action {action} -s {subsystem}"
+            );
             let _ = Command::new("udevadm")
                 .args(["trigger", "--action", action, "-s", subsystem])
                 .output()
