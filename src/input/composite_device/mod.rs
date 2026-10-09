@@ -517,21 +517,25 @@ impl CompositeDevice {
                         break 'main;
                     }
                     CompositeCommand::Suspend(sender) => {
-                        log::info!(
-                            "Preparing to suspend target devices for: {}",
-                            self.dbus.path()
-                        );
+                        log::info!("Preparing to suspend devices for: {}", self.dbus.path());
+                        for (id, source) in self.source_devices.iter() {
+                            if let Err(e) = source.suspend().await {
+                                log::error!("Failed to suspend source device {id}: {e:?}");
+                            }
+                        }
                         self.targets.handle_suspend().await;
                         if let Err(e) = sender.send(()).await {
                             log::error!("Failed to send suspend response: {e:?}");
                         }
                     }
                     CompositeCommand::Resume(sender) => {
-                        log::info!(
-                            "Preparing to resume target devices for: {}",
-                            self.dbus.path()
-                        );
+                        log::info!("Preparing to resume devices for: {}", self.dbus.path());
                         self.targets.handle_resume().await;
+                        for (id, source) in self.source_devices.iter() {
+                            if let Err(e) = source.resume().await {
+                                log::error!("Failed to resume source device {id}: {e:?}");
+                            }
+                        }
                         if let Err(e) = sender.send(()).await {
                             log::error!("Failed to send resume response: {e:?}");
                         }
