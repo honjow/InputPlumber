@@ -1,4 +1,8 @@
-use std::{error::Error, ffi::CString, time::{Duration, Instant}};
+use std::{
+    error::Error,
+    ffi::CString,
+    time::{Duration, Instant},
+};
 
 use hidapi::HidDevice;
 use packed_struct::PackedStruct;
@@ -7,7 +11,7 @@ use crate::udev::device::UdevDevice;
 
 use super::{
     event::{BinaryInput, Event, GamepadButtonEvent},
-    hid_report::{MacroKeyboardDataReport}
+    hid_report::MacroKeyboardDataReport,
 };
 
 pub const VID: u16 = 0x2f24;
@@ -87,17 +91,17 @@ impl MacroKeyboardDriver {
         // Check for release conditions
         if self.l4_pressed && self.l4_last_pressed.elapsed() > RELEASE_DELAY {
             log::trace!("Ended L4 event");
-            events.push(
-                Event::GamepadButton(GamepadButtonEvent::L4(BinaryInput { pressed: false}))
-            );
+            events.push(Event::GamepadButton(GamepadButtonEvent::L4(BinaryInput {
+                pressed: false,
+            })));
             self.l4_pressed = false;
         }
 
         if self.r4_pressed && self.r4_last_pressed.elapsed() > RELEASE_DELAY {
             log::trace!("Ended R4 event");
-            events.push(
-                Event::GamepadButton(GamepadButtonEvent::R4(BinaryInput { pressed: false}))
-            );
+            events.push(Event::GamepadButton(GamepadButtonEvent::R4(BinaryInput {
+                pressed: false,
+            })));
             self.r4_pressed = false;
         }
 
@@ -147,9 +151,9 @@ impl MacroKeyboardDriver {
             self.l4_last_pressed = Instant::now();
             if !self.l4_pressed {
                 log::trace!("Started L4 event");
-                events.push(
-                    Event::GamepadButton(GamepadButtonEvent::L4(BinaryInput { pressed: true}))
-                );
+                events.push(Event::GamepadButton(GamepadButtonEvent::L4(BinaryInput {
+                    pressed: true,
+                })));
                 self.l4_pressed = true;
             }
         }
@@ -158,9 +162,9 @@ impl MacroKeyboardDriver {
             self.r4_last_pressed = Instant::now();
             if !self.r4_pressed {
                 log::trace!("Started R4 event");
-                events.push(
-                    Event::GamepadButton(GamepadButtonEvent::R4(BinaryInput { pressed: true}))
-                );
+                events.push(Event::GamepadButton(GamepadButtonEvent::R4(BinaryInput {
+                    pressed: true,
+                })));
                 self.r4_pressed = true;
             }
         }
