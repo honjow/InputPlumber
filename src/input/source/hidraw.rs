@@ -843,11 +843,9 @@ impl HidRawDevice {
         }
 
         // XpadUhid
-        if kernel_drivers.iter().any(|driver| driver == "microsoft") {
-            if syspath.contains("uhid") {
-                log::info!("Detected UHID XPAD");
-                return DriverType::XpadUhid;
-            }
+        if kernel_drivers.iter().any(|driver| driver == "microsoft") && syspath.contains("uhid") {
+            log::info!("Detected UHID XPAD");
+            return DriverType::XpadUhid;
         }
 
         // Horipad Steam Controller
