@@ -53,6 +53,19 @@ use super::{
     source::client::SourceDeviceClient, target::client::TargetDeviceClient,
 };
 
+/// Exact gesture regions override Any-area mappings. All mappings use the same
+/// translation path so wildcard gestures retain their original source metadata.
+fn profile_mappings<'a>(
+    mappings: &'a HashMap<Capability, Vec<ProfileMapping>>,
+    source: &Capability,
+) -> Option<&'a Vec<ProfileMapping>> {
+    mappings.get(source).or_else(|| {
+        source
+            .with_gesture_area_any()
+            .and_then(|any| mappings.get(&any))
+    })
+}
+
 /// Size of the command channel buffer for processing input events and commands.
 const BUFFER_SIZE: usize = 16384;
 /// Timeout to recover from firmware paths that miss key release events.
@@ -186,6 +199,8 @@ impl CompositeDevice {
         let (tx, rx) = mpsc::channel(BUFFER_SIZE);
         let name = config.name.clone();
         let dbus = DBusInterfaceManager::new(conn.clone(), dbus_path.clone())?;
+        let targets =
+            CompositeDeviceTargets::new(conn, dbus_path, tx.clone().into(), manager, &config);
         let mut device = Self {
             dbus,
             config,
@@ -214,7 +229,7 @@ impl CompositeDevice {
             source_device_tasks: JoinSet::new(),
             source_device_persistent_ids: HashMap::new(),
             source_devices_used: Vec::new(),
-            targets: CompositeDeviceTargets::new(conn, dbus_path, tx.into(), manager),
+            targets,
             ff_enabled: true,
             ff_effect_ids: (0..64).collect(),
             ff_effect_id_source_map: HashMap::new(),
@@ -1614,7 +1629,7 @@ impl CompositeDevice {
         // Lookup the profile mapping associated with this event capability. If
         // none is found, return the original un-translated event.
         let source_cap = event.as_capability();
-        if let Some(mappings) = self.device_profile_config_map.get(&source_cap) {
+        if let Some(mappings) = profile_mappings(&self.device_profile_config_map, &source_cap) {
             // Find which mappings in the device profile matches this source event
             let matched_mappings = mappings
                 .iter()
@@ -2437,5 +2452,82 @@ mod stale_release_tests {
             &tf,
             &Capability::Keyboard(Keyboard::KeyDelete)
         ));
+    }
+}
+
+#[cfg(test)]
+mod gesture_mapping_tests {
+    use super::*;
+    use crate::input::capability::{GestureArea, GestureType, Touch};
+
+    fn gesture(area: GestureArea) -> Capability {
+        Capability::Touchscreen(Touch::Gesture(GestureType::Right(area)))
+    }
+
+    fn mapping(name: &str) -> Vec<ProfileMapping> {
+        vec![ProfileMapping {
+            name: name.into(),
+            source_event: Default::default(),
+            target_events: Vec::new(),
+        }]
+    }
+
+    #[test]
+    fn exact_gesture_region_overrides_wildcard() {
+        let mappings = HashMap::from([
+            (gesture(GestureArea::Any), mapping("wildcard")),
+            (gesture(GestureArea::Top), mapping("top")),
+        ]);
+        assert_eq!(
+            profile_mappings(&mappings, &gesture(GestureArea::Top)).unwrap()[0].name,
+            "top"
+        );
+        assert_eq!(
+            profile_mappings(&mappings, &gesture(GestureArea::Bottom)).unwrap()[0].name,
+            "wildcard"
+        );
+        assert!(profile_mappings(
+            &mappings,
+            &Capability::Touchscreen(Touch::Gesture(GestureType::Up))
+        )
+        .is_none());
+        assert!(profile_mappings(&mappings, &Capability::Touchscreen(Touch::Motion)).is_none());
+    }
+
+    #[test]
+    fn default_gesture_profile_maps_to_guide_and_quick_access() {
+        let profile = DeviceProfile::from_yaml(
+            include_str!("../../../rootfs/usr/share/inputplumber/profiles/default.yaml").into(),
+        )
+        .unwrap();
+        let mappings: HashMap<_, Vec<_>> = profile
+            .mapping
+            .into_iter()
+            .map(|mapping| (mapping.source_event.clone().into(), vec![mapping]))
+            .collect();
+        for (source, button) in [
+            (gesture(GestureArea::Bottom), GamepadButton::Guide),
+            (
+                Capability::Touchscreen(Touch::Gesture(GestureType::Left(GestureArea::Bottom))),
+                GamepadButton::QuickAccess,
+            ),
+        ] {
+            let mapping = &profile_mappings(&mappings, &source).unwrap()[0];
+            let target: Capability = mapping.target_events[0].clone().into();
+            assert_eq!(target, Capability::Gamepad(Gamepad::Button(button)));
+            for pressed in [true, false] {
+                let value = InputValue::Bool(pressed)
+                    .translate(
+                        &source,
+                        &mapping.source_event,
+                        &target,
+                        &mapping.target_events[0],
+                    )
+                    .unwrap();
+                assert_eq!(value.pressed(), pressed);
+                let event = NativeEvent::new_translated(source.clone(), target.clone(), value);
+                assert_eq!(event.get_source_capability(), Some(source.clone()));
+            }
+        }
     }
 }

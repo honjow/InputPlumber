@@ -3,6 +3,7 @@ pub mod command;
 pub mod dbus;
 pub mod debug;
 pub mod dualsense;
+mod gesture_pulse;
 pub mod horipad_steam;
 pub mod keyboard;
 pub mod mouse;
@@ -20,10 +21,11 @@ use std::{
     error::Error,
     io,
     sync::{Arc, Mutex, MutexGuard},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use debug::DebugDevice;
+use gesture_pulse::GesturePulses;
 use horipad_steam::HoripadSteamDevice;
 use steam_deck_uhid::SteamDeckUhidDevice;
 use thiserror::Error;
@@ -454,6 +456,7 @@ pub struct TargetDriver<T: TargetInputDevice + TargetOutputDevice> {
     implementation: Arc<Mutex<T>>,
     composite_device: Option<CompositeDeviceClient>,
     scheduled_events: Vec<ScheduledNativeEvent>,
+    gesture_pulses: GesturePulses,
     tx: mpsc::Sender<TargetCommand>,
     rx: mpsc::Receiver<TargetCommand>,
 }
@@ -480,6 +483,7 @@ impl<T: TargetInputDevice + TargetOutputDevice + Send + 'static> TargetDriver<T>
             implementation: Arc::new(Mutex::new(device)),
             composite_device: None,
             scheduled_events: Vec::new(),
+            gesture_pulses: GesturePulses::default(),
             rx,
             tx,
         }
@@ -554,8 +558,18 @@ impl<T: TargetInputDevice + TargetOutputDevice + Send + 'static> TargetDriver<T>
                             rx,
                             &metrics_tx,
                             &mut implementation,
+                            &mut self.gesture_pulses,
                         ) {
                             log::debug!("Error receiving commands: {e:?}");
+                            break;
+                        }
+                    }
+
+                    // Emit at most one gesture transition per button per poll.
+                    for event in self.gesture_pulses.poll(Instant::now()) {
+                        let mut implementation = self.implementation.lock().unwrap();
+                        if let Err(e) = Self::write_event(&metrics_tx, &mut implementation, event) {
+                            log::error!("Error writing gesture event: {e:?}");
                             break;
                         }
                     }
@@ -597,7 +611,7 @@ impl<T: TargetInputDevice + TargetOutputDevice + Send + 'static> TargetDriver<T>
                         _ = interval.tick() => (),
                         Some(cmd) = rx.recv() => {
                             let mut implementation = self.implementation.lock().unwrap();
-                            let result = Self::process_command(&self.type_id, &mut composite_device, &metrics_tx, &mut implementation, cmd);
+                            let result = Self::process_command(&self.type_id, &mut composite_device, &metrics_tx, &mut implementation, cmd, &mut self.gesture_pulses);
                             if let Err(e) = result {
                                 log::debug!("Error processing received command: {e}");
                                 break;
@@ -659,6 +673,7 @@ impl<T: TargetInputDevice + TargetOutputDevice + Send + 'static> TargetDriver<T>
         rx: &mut mpsc::Receiver<TargetCommand>,
         metrics_tx: &Option<mpsc::Sender<(Capability, EventContext)>>,
         implementation: &mut MutexGuard<'_, T>,
+        gesture_pulses: &mut GesturePulses,
     ) -> Result<(), Box<dyn Error>> {
         const MAX_COMMANDS: u8 = 64;
         let mut commands_processed = 0;
@@ -670,6 +685,7 @@ impl<T: TargetInputDevice + TargetOutputDevice + Send + 'static> TargetDriver<T>
                     metrics_tx,
                     implementation,
                     cmd,
+                    gesture_pulses,
                 )?,
                 Err(e) => match e {
                     TryRecvError::Empty => return Ok(()),
@@ -695,10 +711,13 @@ impl<T: TargetInputDevice + TargetOutputDevice + Send + 'static> TargetDriver<T>
         metrics_tx: &Option<mpsc::Sender<(Capability, EventContext)>>,
         implementation: &mut MutexGuard<'_, T>,
         cmd: TargetCommand,
+        gesture_pulses: &mut GesturePulses,
     ) -> Result<(), Box<dyn Error>> {
         match cmd {
             TargetCommand::WriteEvent(event) => {
-                Self::write_event(metrics_tx, implementation, event)?;
+                if let Some(event) = gesture_pulses.submit(event, Instant::now()) {
+                    Self::write_event(metrics_tx, implementation, event)?;
+                }
             }
             TargetCommand::SetCompositeDevice(device) => {
                 *composite_device = Some(device.clone());
@@ -727,6 +746,7 @@ impl<T: TargetInputDevice + TargetOutputDevice + Send + 'static> TargetDriver<T>
                 });
             }
             TargetCommand::ClearState => {
+                gesture_pulses.clear();
                 implementation.clear_state();
             }
             TargetCommand::Stop => {
@@ -1006,5 +1026,85 @@ impl TargetDevice {
             TargetDevice::XBoxController(device) => device.run().await,
             TargetDevice::UnifiedGamepad(device) => device.run().await,
         }
+    }
+}
+
+#[cfg(test)]
+mod gesture_command_tests {
+    use super::*;
+    use crate::input::{
+        capability::{Gamepad, GamepadButton, GestureType, Touch},
+        event::value::InputValue,
+    };
+
+    #[derive(Default)]
+    struct RecordingTarget {
+        events: Vec<NativeEvent>,
+        cleared: bool,
+    }
+
+    impl TargetInputDevice for RecordingTarget {
+        fn write_event(&mut self, event: NativeEvent) -> Result<(), InputError> {
+            self.events.push(event);
+            Ok(())
+        }
+
+        fn clear_state(&mut self) {
+            self.cleared = true;
+        }
+    }
+
+    impl TargetOutputDevice for RecordingTarget {}
+
+    #[test]
+    fn clear_state_command_cancels_gesture_queue_without_delaying_physical_input() {
+        let target = Mutex::new(RecordingTarget::default());
+        let mut implementation = target.lock().unwrap();
+        let mut pulses = GesturePulses::default();
+        let cap = Capability::Gamepad(Gamepad::Button(GamepadButton::Guide));
+        for pressed in [true, false] {
+            let event = NativeEvent::new_translated(
+                Capability::Touchscreen(Touch::Gesture(GestureType::Up)),
+                cap.clone(),
+                InputValue::Bool(pressed),
+            );
+            TargetDriver::<RecordingTarget>::process_command(
+                &"deck-uhid".try_into().unwrap(),
+                &mut None,
+                &None,
+                &mut implementation,
+                TargetCommand::WriteEvent(event),
+                &mut pulses,
+            )
+            .unwrap();
+        }
+        assert_eq!(implementation.events.len(), 1);
+        TargetDriver::<RecordingTarget>::process_command(
+            &"deck-uhid".try_into().unwrap(),
+            &mut None,
+            &None,
+            &mut implementation,
+            TargetCommand::ClearState,
+            &mut pulses,
+        )
+        .unwrap();
+        assert!(implementation.cleared);
+        assert!(pulses
+            .poll(Instant::now() + Duration::from_secs(1))
+            .is_empty());
+        for pressed in [true, false] {
+            TargetDriver::<RecordingTarget>::process_command(
+                &"deck-uhid".try_into().unwrap(),
+                &mut None,
+                &None,
+                &mut implementation,
+                TargetCommand::WriteEvent(NativeEvent::new(cap.clone(), InputValue::Bool(pressed))),
+                &mut pulses,
+            )
+            .unwrap();
+        }
+        assert_eq!(implementation.events.len(), 3);
+        assert!(implementation.events[1].pressed());
+        assert!(!implementation.events[2].pressed());
     }
 }
