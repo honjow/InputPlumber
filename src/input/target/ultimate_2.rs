@@ -14,8 +14,8 @@ use crate::{
     drivers::ultimate_2::{
         hid_report::{DPadDirection, PackedInputDataReport, PackedRumbleOutputReport},
         report_descriptor::REPORT_DESCRIPTOR,
-        JOY_AXIS_MAX, PID, REPORT_ID_RUMBLE, TRIGGER_AXIS_MAX, ULTIMATE_2_MPS2_TO_ACCEL_RAW,
-        ULTIMATE_2_RAD_S_TO_GYRO_RAW, VID,
+        JOY_AXIS_MAX, JOY_AXIS_MIN, PID, REPORT_ID_RUMBLE, TRIGGER_AXIS_MAX,
+        ULTIMATE_2_MPS2_TO_ACCEL_RAW, ULTIMATE_2_RAD_S_TO_GYRO_RAW, VID,
     },
     input::{
         capability::{Capability, Gamepad, GamepadAxis, GamepadButton, GamepadTrigger, Source},
@@ -24,7 +24,7 @@ use crate::{
             native::{NativeEvent, ScheduledNativeEvent},
             value::{
                 denormalize_accel_value_i16, denormalize_gyro_value_i16,
-                denormalize_unsigned_value_u8, InputValue,
+                denormalize_signed_value_u8, denormalize_unsigned_value_u8, InputValue,
             },
         },
         output_capability::OutputCapability,
@@ -81,38 +81,42 @@ impl Ultimate2WirelessDevice {
     }
 
     fn update_state(&mut self, event: NativeEvent) {
+        Self::update_report(&mut self.state, event);
+    }
+
+    fn update_report(state: &mut PackedInputDataReport, event: NativeEvent) {
         let value = event.get_value();
         let capability = event.as_capability();
 
         match capability {
             Capability::Gamepad(gamepad) => match gamepad {
                 Gamepad::Button(button) => match button {
-                    GamepadButton::South => self.state.button_a = event.pressed(),
-                    GamepadButton::East => self.state.button_b = event.pressed(),
-                    GamepadButton::North => self.state.button_x = event.pressed(),
-                    GamepadButton::West => self.state.button_y = event.pressed(),
-                    GamepadButton::Start => self.state.button_view = event.pressed(),
-                    GamepadButton::Select => self.state.button_menu = event.pressed(),
-                    GamepadButton::Guide => self.state.button_guide = event.pressed(),
-                    GamepadButton::LeftBumper => self.state.button_l1 = event.pressed(),
-                    GamepadButton::RightBumper => self.state.button_r1 = event.pressed(),
-                    GamepadButton::LeftStick => self.state.button_l2 = event.pressed(),
-                    GamepadButton::RightStick => self.state.button_r2 = event.pressed(),
-                    GamepadButton::LeftPaddle1 => self.state.button_l3 = event.pressed(),
-                    GamepadButton::RightPaddle1 => self.state.button_r3 = event.pressed(),
-                    GamepadButton::LeftPaddle2 => self.state.button_l4 = event.pressed(),
-                    GamepadButton::RightPaddle2 => self.state.button_r4 = event.pressed(),
-                    GamepadButton::DPadUp => {
-                        self.state.set_dpad(DPadDirection::Up, event.pressed())
-                    }
-                    GamepadButton::DPadDown => {
-                        self.state.set_dpad(DPadDirection::Down, event.pressed())
-                    }
-                    GamepadButton::DPadLeft => {
-                        self.state.set_dpad(DPadDirection::Left, event.pressed())
-                    }
+                    GamepadButton::South => state.button_a = event.pressed(),
+                    GamepadButton::East => state.button_b = event.pressed(),
+                    GamepadButton::North => state.button_x = event.pressed(),
+                    GamepadButton::West => state.button_y = event.pressed(),
+                    GamepadButton::Start => state.button_view = event.pressed(),
+                    GamepadButton::Select => state.button_menu = event.pressed(),
+                    GamepadButton::Guide => state.button_guide = event.pressed(),
+                    GamepadButton::LeftBumper => state.button_l1 = event.pressed(),
+                    GamepadButton::RightBumper => state.button_r1 = event.pressed(),
+                    GamepadButton::LeftStick => state.button_l2 = event.pressed(),
+                    GamepadButton::RightStick => state.button_r2 = event.pressed(),
+                    GamepadButton::LeftPaddle1 => state.button_l4 = event.pressed(),
+                    GamepadButton::RightPaddle1 => state.button_r4 = event.pressed(),
+                    GamepadButton::LeftPaddle2 => state.button_l3 = event.pressed(),
+                    GamepadButton::RightPaddle2 => state.button_r3 = event.pressed(),
+                    GamepadButton::DPadUp => state.set_dpad(DPadDirection::Up, event.pressed()),
+                    GamepadButton::DPadDown => state.set_dpad(DPadDirection::Down, event.pressed()),
+                    GamepadButton::DPadLeft => state.set_dpad(DPadDirection::Left, event.pressed()),
                     GamepadButton::DPadRight => {
-                        self.state.set_dpad(DPadDirection::Right, event.pressed())
+                        state.set_dpad(DPadDirection::Right, event.pressed())
+                    }
+                    GamepadButton::LeftTrigger => {
+                        state.trigger_l = if event.pressed() { 0xff } else { 0x00 }
+                    }
+                    GamepadButton::RightTrigger => {
+                        state.trigger_r = if event.pressed() { 0xff } else { 0x00 }
                     }
                     _ => (),
                 },
@@ -121,24 +125,24 @@ impl Ultimate2WirelessDevice {
                     GamepadAxis::LeftStick => {
                         if let InputValue::Vector2 { x, y } = value {
                             if let Some(x) = x {
-                                self.state.joystick_l_x =
-                                    denormalize_unsigned_value_u8(x, JOY_AXIS_MAX);
+                                state.joystick_l_x =
+                                    denormalize_signed_value_u8(x, JOY_AXIS_MIN, JOY_AXIS_MAX);
                             }
                             if let Some(y) = y {
-                                self.state.joystick_l_y =
-                                    denormalize_unsigned_value_u8(y, JOY_AXIS_MAX);
+                                state.joystick_l_y =
+                                    denormalize_signed_value_u8(y, JOY_AXIS_MIN, JOY_AXIS_MAX);
                             }
                         }
                     }
                     GamepadAxis::RightStick => {
                         if let InputValue::Vector2 { x, y } = value {
                             if let Some(x) = x {
-                                self.state.joystick_r_x =
-                                    denormalize_unsigned_value_u8(x, JOY_AXIS_MAX);
+                                state.joystick_r_x =
+                                    denormalize_signed_value_u8(x, JOY_AXIS_MIN, JOY_AXIS_MAX);
                             }
                             if let Some(y) = y {
-                                self.state.joystick_r_y =
-                                    denormalize_unsigned_value_u8(y, JOY_AXIS_MAX);
+                                state.joystick_r_y =
+                                    denormalize_signed_value_u8(y, JOY_AXIS_MIN, JOY_AXIS_MAX);
                             }
                         }
                     }
@@ -147,29 +151,27 @@ impl Ultimate2WirelessDevice {
                             if let Some(x) = x {
                                 match x.partial_cmp(&0.0) {
                                     Some(Ordering::Less) => {
-                                        self.state.set_dpad(DPadDirection::Left, true)
+                                        state.set_dpad(DPadDirection::Left, true)
                                     }
                                     Some(Ordering::Equal) => {
-                                        self.state.set_dpad(DPadDirection::Left, false);
-                                        self.state.set_dpad(DPadDirection::Right, false);
+                                        state.set_dpad(DPadDirection::Left, false);
+                                        state.set_dpad(DPadDirection::Right, false);
                                     }
                                     Some(Ordering::Greater) => {
-                                        self.state.set_dpad(DPadDirection::Right, true)
+                                        state.set_dpad(DPadDirection::Right, true)
                                     }
                                     None => (),
                                 }
                             }
                             if let Some(y) = y {
                                 match y.partial_cmp(&0.0) {
-                                    Some(Ordering::Less) => {
-                                        self.state.set_dpad(DPadDirection::Up, true)
-                                    }
+                                    Some(Ordering::Less) => state.set_dpad(DPadDirection::Up, true),
                                     Some(Ordering::Equal) => {
-                                        self.state.set_dpad(DPadDirection::Up, false);
-                                        self.state.set_dpad(DPadDirection::Down, false);
+                                        state.set_dpad(DPadDirection::Up, false);
+                                        state.set_dpad(DPadDirection::Down, false);
                                     }
                                     Some(Ordering::Greater) => {
-                                        self.state.set_dpad(DPadDirection::Down, true)
+                                        state.set_dpad(DPadDirection::Down, true)
                                     }
                                     None => (),
                                 }
@@ -182,14 +184,12 @@ impl Ultimate2WirelessDevice {
                 Gamepad::Trigger(trigger) => match trigger {
                     GamepadTrigger::LeftTrigger => {
                         if let InputValue::Float(v) = value {
-                            self.state.trigger_l =
-                                denormalize_unsigned_value_u8(v, TRIGGER_AXIS_MAX);
+                            state.trigger_l = denormalize_unsigned_value_u8(v, TRIGGER_AXIS_MAX);
                         }
                     }
                     GamepadTrigger::RightTrigger => {
                         if let InputValue::Float(v) = value {
-                            self.state.trigger_r =
-                                denormalize_unsigned_value_u8(v, TRIGGER_AXIS_MAX);
+                            state.trigger_r = denormalize_unsigned_value_u8(v, TRIGGER_AXIS_MAX);
                         }
                     }
                     _ => (),
@@ -203,19 +203,19 @@ impl Ultimate2WirelessDevice {
                     // Invert the SDL standard frame rotation so the wire fields
                     // match a real Ultimate 2 for the same pose.
                     if let Some(x) = x {
-                        self.state.gyro_y = Integer::from_primitive(
+                        state.gyro_y = Integer::from_primitive(
                             denormalize_gyro_value_i16(x, ULTIMATE_2_RAD_S_TO_GYRO_RAW)
                                 .wrapping_neg(),
                         );
                     }
                     if let Some(y) = y {
-                        self.state.gyro_z = Integer::from_primitive(denormalize_gyro_value_i16(
+                        state.gyro_z = Integer::from_primitive(denormalize_gyro_value_i16(
                             y,
                             ULTIMATE_2_RAD_S_TO_GYRO_RAW,
                         ));
                     }
                     if let Some(z) = z {
-                        self.state.gyro_x = Integer::from_primitive(
+                        state.gyro_x = Integer::from_primitive(
                             denormalize_gyro_value_i16(z, ULTIMATE_2_RAD_S_TO_GYRO_RAW)
                                 .wrapping_neg(),
                         );
@@ -227,19 +227,19 @@ impl Ultimate2WirelessDevice {
                     // Invert the SDL standard frame rotation so the wire fields
                     // match a real Ultimate 2 for the same pose.
                     if let Some(x) = x {
-                        self.state.accel_y = Integer::from_primitive(
+                        state.accel_y = Integer::from_primitive(
                             denormalize_accel_value_i16(x, ULTIMATE_2_MPS2_TO_ACCEL_RAW)
                                 .wrapping_neg(),
                         );
                     }
                     if let Some(y) = y {
-                        self.state.accel_z = Integer::from_primitive(denormalize_accel_value_i16(
+                        state.accel_z = Integer::from_primitive(denormalize_accel_value_i16(
                             y,
                             ULTIMATE_2_MPS2_TO_ACCEL_RAW,
                         ));
                     }
                     if let Some(z) = z {
-                        self.state.accel_x = Integer::from_primitive(
+                        state.accel_x = Integer::from_primitive(
                             denormalize_accel_value_i16(z, ULTIMATE_2_MPS2_TO_ACCEL_RAW)
                                 .wrapping_neg(),
                         );
@@ -253,12 +253,16 @@ impl Ultimate2WirelessDevice {
 
     // Rumble output report format: [0x05, strong_hi, weak_hi, 0x00, 0x00]
     fn handle_output(&mut self, data: Vec<u8>) -> Result<Vec<OutputEvent>, Box<dyn Error>> {
+        Self::decode_output_report(&data)
+    }
+
+    fn decode_output_report(data: &[u8]) -> Result<Vec<OutputEvent>, Box<dyn Error>> {
         let Some(&report_id) = data.first() else {
             return Ok(vec![]);
         };
 
         if report_id == REPORT_ID_RUMBLE {
-            let buf: [u8; 5] = data.as_slice().try_into()?;
+            let buf: [u8; 5] = data.try_into()?;
             let report = PackedRumbleOutputReport::unpack(&buf)?;
             let strong_magnitude = (report.strong_magnitude as u16) << 8;
             let weak_magnitude = (report.weak_magnitude as u16) << 8;
@@ -467,5 +471,142 @@ impl Debug for Ultimate2WirelessDevice {
         f.debug_struct("Ultimate2WirelessDevice")
             .field("state", &self.state)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+
+    fn button(state: &mut PackedInputDataReport, button: GamepadButton, pressed: bool) {
+        Ultimate2WirelessDevice::update_report(
+            state,
+            NativeEvent::new(
+                Capability::Gamepad(Gamepad::Button(button)),
+                InputValue::Bool(pressed),
+            ),
+        );
+    }
+
+    #[test]
+    fn target_stick_signed_endpoints_and_center() {
+        let mut state = PackedInputDataReport::default();
+        for (value, expected) in [(-1.0, 0), (0.0, 127), (1.0, 255)] {
+            for axis in [GamepadAxis::LeftStick, GamepadAxis::RightStick] {
+                Ultimate2WirelessDevice::update_report(
+                    &mut state,
+                    NativeEvent::new(
+                        Capability::Gamepad(Gamepad::Axis(axis)),
+                        InputValue::Vector2 {
+                            x: Some(value),
+                            y: Some(value),
+                        },
+                    ),
+                );
+            }
+            assert_eq!(&state.pack().unwrap()[2..6], &[expected; 4]);
+        }
+    }
+
+    #[test]
+    fn target_paddles_and_digital_triggers_pack_to_expected_bytes() {
+        for (paddle, byte, mask) in [
+            (GamepadButton::LeftPaddle1, 10, 1),
+            (GamepadButton::RightPaddle1, 10, 2),
+            (GamepadButton::LeftPaddle2, 8, 0x20),
+            (GamepadButton::RightPaddle2, 8, 4),
+        ] {
+            let mut state = PackedInputDataReport::default();
+            button(&mut state, paddle, true);
+            assert_eq!(state.pack().unwrap()[byte], mask);
+        }
+        let mut state = PackedInputDataReport::default();
+        button(&mut state, GamepadButton::LeftTrigger, true);
+        button(&mut state, GamepadButton::RightTrigger, true);
+        assert_eq!(&state.pack().unwrap()[6..8], &[255, 255]);
+        button(&mut state, GamepadButton::LeftTrigger, false);
+        button(&mut state, GamepadButton::RightTrigger, false);
+        assert_eq!(&state.pack().unwrap()[6..8], &[0, 0]);
+    }
+
+    #[test]
+    fn target_imu_uses_si_units_and_inverts_upstream_frame_once() {
+        use crate::drivers::ultimate_2::{GRAVITY_MPS2, ULTIMATE_2_GYRO_RAW_TO_RAD_S};
+        let mut state = PackedInputDataReport::default();
+        Ultimate2WirelessDevice::update_report(
+            &mut state,
+            NativeEvent::new(
+                Capability::Accelerometer(Source::Center),
+                InputValue::Vector3 {
+                    x: Some(GRAVITY_MPS2),
+                    y: Some(2.0 * GRAVITY_MPS2),
+                    z: Some(-GRAVITY_MPS2),
+                },
+            ),
+        );
+        assert_eq!(
+            (
+                i16::from(state.accel_x),
+                i16::from(state.accel_y),
+                i16::from(state.accel_z)
+            ),
+            (4096, -4096, 8192)
+        );
+        Ultimate2WirelessDevice::update_report(
+            &mut state,
+            NativeEvent::new(
+                Capability::Gyroscope(Source::Center),
+                InputValue::Vector3 {
+                    x: Some(100.0 * ULTIMATE_2_GYRO_RAW_TO_RAD_S),
+                    y: Some(200.0 * ULTIMATE_2_GYRO_RAW_TO_RAD_S),
+                    z: Some(-300.0 * ULTIMATE_2_GYRO_RAW_TO_RAD_S),
+                },
+            ),
+        );
+        assert_eq!(
+            (
+                i16::from(state.gyro_x),
+                i16::from(state.gyro_y),
+                i16::from(state.gyro_z)
+            ),
+            (300, -100, 200)
+        );
+    }
+
+    #[test]
+    fn target_trigger_channels_keep_physical_byte_order() {
+        let mut state = PackedInputDataReport::default();
+        button(&mut state, GamepadButton::LeftTrigger, true);
+        assert_eq!(&state.pack().unwrap()[6..8], &[0, 255]);
+        button(&mut state, GamepadButton::LeftTrigger, false);
+        Ultimate2WirelessDevice::update_report(
+            &mut state,
+            NativeEvent::new(
+                Capability::Gamepad(Gamepad::Trigger(GamepadTrigger::RightTrigger)),
+                InputValue::Float(0.5),
+            ),
+        );
+        assert_eq!(&state.pack().unwrap()[6..8], &[128, 0]);
+    }
+
+    #[test]
+    fn target_rumble_reports_keep_upstream_magnitudes_and_reject_short_payloads() {
+        let output =
+            Ultimate2WirelessDevice::decode_output_report(&[REPORT_ID_RUMBLE, 0x80, 0x40, 0, 0])
+                .unwrap();
+        assert!(matches!(
+            output.as_slice(),
+            [OutputEvent::GenericRumble {
+                strong_magnitude: 0x8000,
+                weak_magnitude: 0x4000
+            }]
+        ));
+        assert!(Ultimate2WirelessDevice::decode_output_report(&[REPORT_ID_RUMBLE, 1]).is_err());
+        assert!(Ultimate2WirelessDevice::decode_output_report(&[])
+            .unwrap()
+            .is_empty());
+        assert!(Ultimate2WirelessDevice::decode_output_report(&[0xff])
+            .unwrap()
+            .is_empty());
     }
 }

@@ -28,5 +28,8 @@ pub const GYRO_MAX_RADIANS_PER_SECOND: f64 = GYRO_MAX_DEGREES_PER_SECOND * (PI /
 pub const ULTIMATE_2_RAD_S_TO_GYRO_RAW: f64 = i16::MAX as f64 / GYRO_MAX_RADIANS_PER_SECOND;
 pub const ULTIMATE_2_GYRO_RAW_TO_RAD_S: f64 = 1.0 / ULTIMATE_2_RAD_S_TO_GYRO_RAW;
 
+// Physical and virtual input reports both use the real controller descriptor.
+// Keep the target name explicit so future changes cannot silently break the source.
 pub const REPORT_ID_INPUT: u8 = 0x01;
+pub const REPORT_ID_TARGET_INPUT: u8 = REPORT_ID_INPUT;
 pub const REPORT_ID_RUMBLE: u8 = 0x05;
