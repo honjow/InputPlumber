@@ -8,7 +8,7 @@ use std::{
 
 use crate::input::{
     capability::{Capability, Gamepad, Mouse, Touch},
-    event::native::NativeEvent,
+    event::{native::NativeEvent, value::InputValue},
 };
 
 /// Give consumers sampling HID state enough time to observe a synthetic press.
@@ -20,7 +20,7 @@ const RELEASE_TIME: Duration = Duration::from_millis(80);
 struct Pulse {
     pending: VecDeque<NativeEvent>,
     ready_at: Option<Instant>,
-    pressed: bool,
+    pressed_event: Option<NativeEvent>,
 }
 
 impl Pulse {
@@ -29,11 +29,11 @@ impl Pulse {
             return None;
         }
         let event = self.pending.pop_front()?;
-        self.pressed = event.pressed();
+        self.pressed_event = event.pressed().then(|| event.clone());
         // Start each interval when the transition is emitted, not when it was
         // queued: a busy target must not collapse an entire pulse into one poll.
         self.ready_at = Some(
-            now + if self.pressed {
+            now + if event.pressed() {
                 PRESS_TIME
             } else {
                 RELEASE_TIME
@@ -93,16 +93,29 @@ impl GesturePulses {
             if let Some(event) = pulse.next(now) {
                 events.push(event);
             }
-            pulse.pressed
+            pulse.pressed_event.is_some()
                 || !pulse.pending.is_empty()
                 || pulse.ready_at.is_some_and(|ready_at| now < ready_at)
         });
         events
     }
 
-    pub fn clear(&mut self) {
-        self.pulses.clear();
+    /// Cancel queued transitions and release only gesture-owned buttons. This
+    /// also works for event-based keyboard/mouse targets whose clear_state()
+    /// does not keep a full pressed-key state snapshot.
+    pub fn clear(&mut self) -> Vec<NativeEvent> {
         self.physical_pressed.clear();
+        self.pulses
+            .drain()
+            .filter_map(|(cap, pulse)| {
+                let event = pulse.pressed_event?;
+                let mut release = NativeEvent::new(cap, InputValue::Bool(false));
+                if let Some(source) = event.get_source_capability() {
+                    release.set_source_capability(source);
+                }
+                Some(release)
+            })
+            .collect()
     }
 }
 
@@ -196,9 +209,22 @@ mod tests {
         for pressed in [true, false, true, false] {
             pulses.submit(gesture(pressed), now);
         }
-        pulses.clear();
+        let releases = pulses.clear();
+        assert_eq!(releases.len(), 1);
+        assert!(!releases[0].pressed());
         assert!(pulses.poll(now + Duration::from_secs(1)).is_empty());
         assert!(pulses.submit(gesture(true), now).unwrap().pressed());
+    }
+
+    #[test]
+    fn clear_state_does_not_synthesize_releases_for_physical_input() {
+        let mut pulses = GesturePulses::default();
+        let now = Instant::now();
+        pulses.submit(gesture(true), now);
+        pulses.submit(gesture(false), now);
+        pulses.submit(button(true), now);
+        assert!(pulses.clear().is_empty());
+        assert!(pulses.poll(now + Duration::from_secs(1)).is_empty());
     }
 
     #[test]

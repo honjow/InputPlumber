@@ -25,6 +25,37 @@ use crate::{
 
 use super::client::CompositeDeviceClient;
 
+/// Creation and attachment can finish in either order: manager attachment
+/// messages may arrive before the background creation task reports completion.
+#[derive(Debug, Default)]
+struct TargetCreationState {
+    in_progress: bool,
+    waiting_for_attachment: HashSet<String>,
+    pending_devices: Option<Vec<TargetDeviceTypeId>>,
+}
+
+impl TargetCreationState {
+    fn is_pending(&self) -> bool {
+        self.in_progress || !self.waiting_for_attachment.is_empty()
+    }
+
+    fn finish<T>(&mut self, paths: Vec<String>, attached: &HashMap<String, T>) {
+        self.in_progress = false;
+        self.waiting_for_attachment.extend(
+            paths
+                .into_iter()
+                .filter(|path| !attached.contains_key(path)),
+        );
+    }
+
+    fn take_pending_devices(&mut self) -> Option<Vec<TargetDeviceTypeId>> {
+        if self.is_pending() {
+            return None;
+        }
+        self.pending_devices.take()
+    }
+}
+
 /// Manages target devices for a composite device
 #[derive(Debug)]
 pub struct CompositeDeviceTargets {
@@ -44,14 +75,8 @@ pub struct CompositeDeviceTargets {
     /// so its transmitter channel can be looked up in `target_devices`.
     /// E.g. {Capability::Keyboard: ["/org/shadowblip/InputPlumber/devices/target/keyboard0"]}
     target_devices_by_capability: HashMap<Capability, HashSet<String>>,
-    /// List of target devices waiting to be attached to this composite device.
-    /// This is used to block/requeue multiple calls to set_target_devices().
-    /// E.g. ["/org/shadowblip/InputPlumber/devices/target/gamepad0"]
-    target_devices_queued: HashSet<String>,
-    /// Whether target device creation is in progress.
-    target_creation_in_progress: bool,
-    /// Deferred set target devices request.
-    pending_set_devices: Option<Vec<TargetDeviceTypeId>>,
+    /// Coordinates asynchronous creation and attachment with deferred requests.
+    target_creation: TargetCreationState,
     /// List of active target device types (e.g. "deck", "ds5", "xb360") that
     /// were active before system suspend.
     target_devices_suspended: Vec<TargetDeviceTypeId>,
@@ -88,9 +113,7 @@ impl CompositeDeviceTargets {
             manager,
             target_devices: Default::default(),
             target_devices_by_capability: Default::default(),
-            target_devices_queued: Default::default(),
-            target_creation_in_progress: false,
-            pending_set_devices: None,
+            target_creation: TargetCreationState::default(),
             target_devices_suspended: Default::default(),
             target_dbus_devices: Default::default(),
             has_touchscreen_source,
@@ -173,11 +196,11 @@ impl CompositeDeviceTargets {
 
         // Check to see if there are target device attachments pending. If so,
         // defer this request until that work is done.
-        if self.target_creation_in_progress || !self.target_devices_queued.is_empty() {
+        if self.target_creation.is_pending() {
             log::debug!(
                 "[{dbus_path}] Target devices are being created or attached. Deferring set target devices.",
             );
-            self.pending_set_devices = Some(device_types);
+            self.target_creation.pending_devices = Some(device_types);
             return Ok(());
         }
 
@@ -218,7 +241,7 @@ impl CompositeDeviceTargets {
             }
         }
 
-        self.target_creation_in_progress = true;
+        self.target_creation.in_progress = true;
 
         let manager = self.manager.clone();
         let composite_path = self.path.clone();
@@ -323,17 +346,13 @@ impl CompositeDeviceTargets {
     /// the creation flag and enqueues the created target devices to wait for
     /// their attachment message.
     pub fn finish_target_creation(&mut self, paths: Vec<String>) {
-        self.target_creation_in_progress = false;
-        self.target_devices_queued.extend(paths);
+        self.target_creation.finish(paths, &self.target_devices);
     }
 
     /// Take the deferred set target devices request, if any and if no target
     /// devices are being created or waiting for attachment.
     pub fn take_pending_set_devices(&mut self) -> Option<Vec<TargetDeviceTypeId>> {
-        if self.target_creation_in_progress || !self.target_devices_queued.is_empty() {
-            return None;
-        }
-        self.pending_set_devices.take()
+        self.target_creation.take_pending_devices()
     }
 
     /// Return a list of currently running target devices
@@ -584,7 +603,7 @@ impl CompositeDeviceTargets {
             }
 
             // Add the target device
-            self.target_devices_queued.remove(&path);
+            self.target_creation.waiting_for_attachment.remove(&path);
             self.target_devices.insert(path.clone(), target);
         }
 
@@ -684,5 +703,58 @@ impl CompositeDeviceTargets {
                 log::error!("[{dbus_path}] Failed to send target devices changed signal: {e}");
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod creation_tests {
+    use super::*;
+
+    #[test]
+    fn attachment_before_creation_completion_does_not_block_next_request() {
+        let next = vec!["ds5".try_into().unwrap()];
+        let mut state = TargetCreationState {
+            in_progress: true,
+            pending_devices: Some(next.clone()),
+            ..Default::default()
+        };
+        assert!(state.take_pending_devices().is_none());
+        let attached = HashMap::from([("gamepad0".into(), ())]);
+        state.finish(vec!["gamepad0".into()], &attached);
+        assert_eq!(state.take_pending_devices(), Some(next));
+        assert!(!state.is_pending());
+    }
+
+    #[test]
+    fn creation_before_attachment_waits_for_all_targets() {
+        let next = vec!["deck".try_into().unwrap()];
+        let mut state = TargetCreationState {
+            in_progress: true,
+            pending_devices: Some(next.clone()),
+            ..Default::default()
+        };
+        state.finish(
+            vec!["gamepad0".into(), "touchscreen0".into()],
+            &HashMap::<String, ()>::new(),
+        );
+        assert!(state.take_pending_devices().is_none());
+        state.waiting_for_attachment.remove("gamepad0");
+        assert!(state.take_pending_devices().is_none());
+        state.waiting_for_attachment.remove("touchscreen0");
+        assert_eq!(state.take_pending_devices(), Some(next));
+        assert!(state.take_pending_devices().is_none());
+    }
+
+    #[test]
+    fn failed_creation_releases_latest_deferred_request() {
+        let mut state = TargetCreationState {
+            in_progress: true,
+            pending_devices: Some(vec!["deck".try_into().unwrap()]),
+            ..Default::default()
+        };
+        let latest = vec!["ds5".try_into().unwrap()];
+        state.pending_devices = Some(latest.clone());
+        state.finish(Vec::new(), &HashMap::<String, ()>::new());
+        assert_eq!(state.take_pending_devices(), Some(latest));
     }
 }

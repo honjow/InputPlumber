@@ -201,8 +201,13 @@ impl CompositeDevice {
         let (tx, rx) = mpsc::channel(BUFFER_SIZE);
         let name = config.name.clone();
         let dbus = DBusInterfaceManager::new(conn.clone(), dbus_path.clone())?;
-        let targets =
-            CompositeDeviceTargets::new(conn, dbus_path, tx.clone().into(), manager.clone(), &config);
+        let targets = CompositeDeviceTargets::new(
+            conn,
+            dbus_path,
+            tx.clone().into(),
+            manager.clone(),
+            &config,
+        );
         let mut device = Self {
             dbus,
             config,
