@@ -12,7 +12,7 @@ use mio::{Events, Interest, Poll, Token};
 use thiserror::Error;
 use tokio::{
     sync::mpsc,
-    task::{self, JoinHandle},
+    task::{self, JoinSet},
 };
 use zbus::{fdo::ManagedObjects, zvariant::ObjectPath, Connection};
 
@@ -52,6 +52,11 @@ use crate::{dmi::get_dmi_data, input::composite_device::CompositeDevice};
 const DEV_PATH: &str = "/dev";
 const INPUT_PATH: &str = "/dev/input";
 const BUFFER_SIZE: usize = 20480;
+const UDEV_INIT_RECHECK_INTERVAL: Duration = Duration::from_secs(1);
+/// Max recheck attempts before an uninitialized device is dropped
+const UDEV_INIT_MAX_RECHECKS: u32 = 30;
+/// Sysnames prefixes that udev never initializes, dropped without recheck
+const UDEVS_SKIP_RECHECK: &[&str] = &["trigger"];
 const VIRT_DEVICE_WHITELIST: &[&str] = &[
     "Sunshine PS5 (virtual) pad",
     "Sunshine X-Box One (virtual) pad",
@@ -84,6 +89,7 @@ pub enum ManagerCommand {
     },
     CreateTargetDevice {
         kind: TargetDeviceTypeId,
+        persistent_id: Option<String>,
         sender: mpsc::Sender<Result<String, ManagerError>>,
     },
     StopTargetDevice {
@@ -96,6 +102,10 @@ pub enum ManagerCommand {
     },
     TargetDeviceStopped {
         path: String,
+    },
+    SourceDeviceStopped {
+        composite_path: String,
+        device_id: String,
     },
     RemoveFromGamepadOrder {
         device_path: String,
@@ -115,6 +125,7 @@ pub enum ManagerCommand {
         dbus_paths: Vec<String>,
     },
     GamepadReorderingFinished,
+    RecheckUninitializedUdevDevices,
 }
 
 /// Manages input devices
@@ -157,12 +168,15 @@ pub struct Manager {
     /// E.g. {"/org/shadowblip/InputPlumber/CompositeDevice0": <Handle>}
     composite_devices: HashMap<String, CompositeDeviceClient>,
     /// Mapping of all source devices used by composite devices with the CompositeDevice path as
-    /// the key for the hashmap.
-    /// E.g. {"/org/shadowblip/InputPlumber/CompositeDevice0": Vec<SourceDevice>}
-    composite_device_sources: HashMap<String, Vec<SourceDevice>>,
+    /// the key for the hashmap. Each entry is a pair of the config entry and the id of the
+    /// device consuming it.
+    /// E.g. {"/org/shadowblip/InputPlumber/CompositeDevice0": Vec<(SourceDevice, "evdev://event3")>}
+    composite_device_sources: HashMap<String, Vec<(SourceDevice, String)>>,
     /// Map of target devices being used by a [CompositeDevice].
     /// E.g. {"/org/shadowblip/InputPlumber/CompositeDevice0": Vec<"/org/shadowblip/InputPlumber/devices/target/dbus0">}
     composite_device_targets: HashMap<String, HashSet<String>>,
+    /// Track all composite device tasks so they can be gracefully stopped
+    composite_device_tasks: JoinSet<()>,
     /// Mapping of DBus path to its corresponding [CompositeDeviceConfig]
     /// E.g. {"/org/shadowblip/InputPlumber/CompositeDevice0": <CompositeDeviceConfig>}
     used_configs: HashMap<String, CompositeDeviceConfig>,
@@ -177,6 +191,9 @@ pub struct Manager {
     /// Defines whether or not InputPlumber should try to automatically manage all
     /// input devices that have a [CompositeDeviceConfig] definition
     manage_all_devices: bool,
+    /// Devices that udev has not finished initializing, keyed by
+    /// (subsystem, sysname) with the recheck attempt count
+    uninitialized_udev_devices: HashMap<(String, String), u32>,
 }
 
 impl Manager {
@@ -215,9 +232,11 @@ impl Manager {
             used_configs: HashMap::new(),
             composite_device_sources: HashMap::new(),
             composite_device_targets: HashMap::new(),
+            composite_device_tasks: Default::default(),
             manage_all_devices: false,
             target_gamepad_order: vec![],
             target_gamepad_order_changing: false,
+            uninitialized_udev_devices: HashMap::new(),
         }
     }
 
@@ -260,6 +279,46 @@ impl Manager {
         Ok(())
     }
 
+    /// Sends [ManagerCommand::RecheckUninitializedUdevDevices] after
+    /// [UDEV_INIT_RECHECK_INTERVAL] so devices that were reported before udev
+    /// finished initializing them are added once udev is done with them
+    fn schedule_recheck_initialized(&self) {
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(UDEV_INIT_RECHECK_INTERVAL).await;
+            let _ = tx
+                .send(ManagerCommand::RecheckUninitializedUdevDevices)
+                .await;
+        });
+    }
+
+    /// Perform a graceful shutdown of all [CompositeDevice]s
+    pub async fn shutdown(&mut self) {
+        log::info!("Shutting down input manager");
+
+        for (path, device) in self.composite_devices.iter() {
+            if let Err(e) = device.stop().await {
+                log::debug!("Failed to send stop command to composite device {path}: {e:?}");
+            }
+        }
+
+        let drained = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(res) = self.composite_device_tasks.join_next().await {
+                if let Err(e) = res {
+                    log::warn!("Composite device task panicked during shutdown: {e:?}");
+                }
+            }
+        })
+        .await;
+
+        if drained.is_err() {
+            log::warn!("Timed out waiting for composite devices, cancelling remaining tasks");
+            self.composite_device_tasks.shutdown().await;
+        }
+
+        log::info!("Input manager shutdown complete");
+    }
+
     /// Manage events generated by various components
     async fn events_loop(&mut self) -> Result<(), Box<dyn Error>> {
         // Loop and listen for command events
@@ -276,10 +335,17 @@ impl Manager {
                         log::error!("Error handling stopped composite device: {:?}", e);
                     }
                 }
-                ManagerCommand::CreateTargetDevice { kind, sender } => {
+                ManagerCommand::CreateTargetDevice {
+                    kind,
+                    persistent_id,
+                    sender,
+                } => {
                     // Create the target device
                     log::debug!("Got request to create target device: {kind}");
-                    let device = match self.create_and_start_target_device(kind.as_str()).await {
+                    let device = match self
+                        .create_and_start_target_device(kind.as_str(), persistent_id.as_deref())
+                        .await
+                    {
                         Ok(device) => device,
                         Err(err) => {
                             if let Err(e) = sender.send(Err(err)).await {
@@ -395,6 +461,15 @@ impl Manager {
                         }
                     });
                 }
+                ManagerCommand::SourceDeviceStopped {
+                    composite_path,
+                    device_id,
+                } => {
+                    log::debug!(
+                        "Source device {device_id} stopped in composite device {composite_path}"
+                    );
+                    self.remove_stopped_source_device(&composite_path, &device_id);
+                }
                 ManagerCommand::RemoveFromGamepadOrder { device_path } => {
                     // A gamepad target may have been re-attached while this
                     // request was in flight (e.g. during a profile switch).
@@ -420,6 +495,30 @@ impl Manager {
                         let dev_name = device.name();
                         let dev_sysname = device.sysname();
 
+                        // Park devices that udev has not finished initializing
+                        // so they are not matched with a minimal property set
+                        if !device.is_initialized() {
+                            if UDEVS_SKIP_RECHECK
+                                .iter()
+                                .any(|p| dev_sysname.starts_with(p))
+                            {
+                                log::debug!(
+                                    "Device {dev_name} ({dev_sysname}) is not initialized by udev and matches a known never-initialized pattern, dropping"
+                                );
+                                continue;
+                            }
+                            log::debug!(
+                                "Device {dev_name} ({dev_sysname}) is not yet initialized by udev, parking for recheck"
+                            );
+                            let was_empty = self.uninitialized_udev_devices.is_empty();
+                            self.uninitialized_udev_devices
+                                .insert((device.subsystem(), dev_sysname.clone()), 0);
+                            if was_empty {
+                                self.schedule_recheck_initialized();
+                            }
+                            continue;
+                        }
+
                         if let Err(e) = self.on_udev_device_added(device).await {
                             log::error!("Error adding device '{dev_name} ({dev_sysname})': {e}");
                         }
@@ -427,6 +526,10 @@ impl Manager {
                 },
                 ManagerCommand::DeviceRemoved { device } => match device {
                     DeviceInfo::Udev(device) => {
+                        // Drop the device from the uninitialized list if it was
+                        // parked there waiting for udev initialization
+                        self.uninitialized_udev_devices
+                            .remove(&(device.subsystem(), device.sysname()));
                         if let Err(e) = self.on_udev_device_removed(device).await {
                             log::error!("Error removing device: {e}");
                         }
@@ -550,12 +653,68 @@ impl Manager {
                     log::info!("Finished reordering target devices");
                     self.target_gamepad_order_changing = false;
                 }
+                ManagerCommand::RecheckUninitializedUdevDevices => {
+                    self.recheck_uninitialized_devices().await;
+                }
             }
         }
 
         log::info!("Stopped input manager");
 
         Ok(())
+    }
+
+    /// Rechecks devices that were reported before udev finished initializing
+    /// them. Adds any that are now initialized and drops any that have been
+    /// removed in the meantime.
+    async fn recheck_uninitialized_devices(&mut self) {
+        if self.uninitialized_udev_devices.is_empty() {
+            return;
+        }
+
+        let uninitialized: Vec<(String, String)> =
+            self.uninitialized_udev_devices.keys().cloned().collect();
+        for (subsystem, sysname) in uninitialized {
+            let key = (subsystem.clone(), sysname.clone());
+            let Ok(device) =
+                ::udev::Device::from_subsystem_sysname(subsystem.clone(), sysname.clone())
+            else {
+                log::debug!("Device {subsystem}/{sysname} is no longer present, dropping from uninitialized list");
+                self.uninitialized_udev_devices.remove(&key);
+                continue;
+            };
+
+            if device.is_initialized() {
+                log::debug!("Device {subsystem}/{sysname} is now initialized, adding");
+                self.uninitialized_udev_devices.remove(&key);
+                let device = UdevDevice::from(device);
+                if let Err(e) = self.on_udev_device_added(device).await {
+                    log::error!("Error adding device '{subsystem}/{sysname}': {e}");
+                }
+                continue;
+            }
+
+            // Count recheck attempts, drop the device at the limit
+            let count = self
+                .uninitialized_udev_devices
+                .get(&key)
+                .copied()
+                .unwrap_or(0)
+                + 1;
+            if count >= UDEV_INIT_MAX_RECHECKS {
+                log::warn!(
+                    "Device {subsystem}/{sysname} is still not initialized by udev after {count} rechecks, dropping from uninitialized list"
+                );
+                self.uninitialized_udev_devices.remove(&key);
+            } else {
+                // Update recheck count
+                self.uninitialized_udev_devices.insert(key, count);
+            }
+        }
+
+        if !self.uninitialized_udev_devices.is_empty() {
+            self.schedule_recheck_initialized();
+        }
     }
 
     /// Create a new [CompositeDevice] from the given [CompositeDeviceConfig]
@@ -613,6 +772,7 @@ impl Manager {
     async fn create_target_device(
         &self,
         kind: &str,
+        persistent_id: Option<&str>,
     ) -> Result<(String, TargetDevice), Box<dyn Error>> {
         log::trace!("Creating target device: {kind}");
         let Ok(target_id) = TargetDeviceTypeId::try_from(kind) else {
@@ -622,7 +782,8 @@ impl Manager {
         // Create the target device to emulate based on the kind
         let path = self.next_target_path(target_id.device_class())?;
         let dbus = DBusInterfaceManager::new(self.dbus.connection().clone(), path.clone())?;
-        let device = TargetDevice::from_type_id(target_id, dbus)?;
+        let id = persistent_id.unwrap_or(&path);
+        let device = TargetDevice::from_type_id(target_id, dbus, id)?;
 
         Ok((path, device))
     }
@@ -786,9 +947,10 @@ impl Manager {
     async fn create_and_start_target_device(
         &mut self,
         kind: &str,
+        persistent_id: Option<&str>,
     ) -> Result<HashMap<String, TargetDeviceClient>, ManagerError> {
         // Create the target device
-        let device = match self.create_target_device(kind).await {
+        let device = match self.create_target_device(kind, persistent_id).await {
             Ok(device) => device,
             Err(e) => {
                 let err = format!("Error creating target device: {e:?}");
@@ -817,7 +979,7 @@ impl Manager {
         config: CompositeDeviceConfig,
         target_types: Option<Vec<String>>,
         source_device: SourceDevice,
-    ) -> Result<JoinHandle<()>, Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> {
         // Keep track of the source devices that this composite device is
         // using.
         let source_device_ids = device.get_source_devices_used();
@@ -825,11 +987,6 @@ impl Manager {
         log::debug!(
             "Starting CompositeDevice at {composite_path} with the following sources: {source_device_ids:?}"
         );
-        for id in source_device_ids {
-            self.source_devices_used
-                .insert(id.clone(), composite_path.clone());
-            self.source_devices.insert(id, source_device.clone());
-        }
 
         if !self.composite_device_sources.contains_key(&composite_path) {
             self.composite_device_sources
@@ -839,7 +996,13 @@ impl Manager {
             .composite_device_sources
             .get_mut(&composite_path)
             .unwrap();
-        sources.push(source_device);
+        for id in source_device_ids {
+            self.source_devices_used
+                .insert(id.clone(), composite_path.clone());
+            self.source_devices
+                .insert(id.clone(), source_device.clone());
+            sources.push((source_device.clone(), id));
+        }
 
         // Get a handle to the device
         let client = device.client();
@@ -861,7 +1024,7 @@ impl Manager {
 
         // Create a DBus target device
         log::debug!("Creating target devices for {composite_path}");
-        let dbus_device = self.create_target_device("dbus").await?;
+        let dbus_device = self.create_target_device("dbus", None).await?;
         let dbus_devices = self.start_target_devices(vec![dbus_device]).await?;
         let dbus_paths = dbus_devices.keys();
         for dbus_path in dbus_paths {
@@ -884,7 +1047,7 @@ impl Manager {
         // Run the device
         let composite_path = String::from(device.dbus_path());
         let tx = self.tx.clone();
-        let task = tokio::spawn(async move {
+        self.composite_device_tasks.spawn(async move {
             if let Err(e) = device.run().await {
                 log::error!("Error running {composite_path}: {e}");
             }
@@ -901,12 +1064,21 @@ impl Manager {
             }
         });
 
-        Ok(task)
+        Ok(())
     }
 
     /// Called when a composite device stops running
     async fn on_composite_device_stopped(&mut self, path: String) -> Result<(), Box<dyn Error>> {
         log::debug!("Removing composite device: {}", path);
+
+        // Remove any finished task entries from the join set
+        while let Ok(Some(res)) =
+            tokio::time::timeout(Duration::ZERO, self.composite_device_tasks.join_next()).await
+        {
+            if let Err(e) = res {
+                log::warn!("Composite device task panicked: {e:?}");
+            }
+        }
 
         // Find any source devices that were in use by the composite device
         let mut to_remove = Vec::new();
@@ -923,7 +1095,15 @@ impl Manager {
         // Find any target devices that were in use by the composite device
         if let Some(target_device_paths) = self.composite_device_targets.get(&path) {
             for target_device_path in target_device_paths {
-                self.target_devices.remove(target_device_path);
+                let Some(client) = self.target_devices.remove(target_device_path) else {
+                    log::error!(
+                        "Failed to remove target device {target_device_path} from target devices."
+                    );
+                    continue;
+                };
+                if let Err(e) = client.stop().await {
+                    log::warn!("Failed to stop target device {target_device_path}: {e:?}");
+                }
             }
         }
 
@@ -1020,7 +1200,7 @@ impl Manager {
             // Check if the device has already been used in this config or not,
             // stop here if the device must be unique.
             if let Some(sources) = self.composite_device_sources.get(composite_device) {
-                for source in sources {
+                for (source, _) in sources {
                     if *source != source_device {
                         continue;
                     }
@@ -1062,7 +1242,7 @@ impl Manager {
                 .composite_device_sources
                 .get_mut(&composite_id)
                 .unwrap();
-            sources.push(source_device.clone());
+            sources.push((source_device.clone(), id.clone()));
             self.source_devices.insert(id, source_device.clone());
 
             return Ok(());
@@ -1153,15 +1333,15 @@ impl Manager {
 
         client.remove_source_device(device).await?;
 
-        let Some(device) = self.source_devices.get(&id) else {
+        if !self.source_devices.contains_key(&id) {
             return Err(format!("Device {} not found in source devices", id).into());
-        };
+        }
 
         let Some(sources) = self.composite_device_sources.get_mut(composite_device_path) else {
             return Err(format!("CompostiteDevice {} not found", composite_device_path).into());
         };
 
-        let idx = sources.iter().position(|item| item == device);
+        let idx = sources.iter().position(|(_, source_id)| source_id == &id);
         if idx.is_none() {
             self.source_devices.remove(&id);
             return Err(format!("Device {} not found in composite device sources", id).into());
@@ -1171,6 +1351,17 @@ impl Manager {
         self.source_devices_used.remove(&id);
 
         Ok(())
+    }
+
+    /// Removes bookkeeping for a source device that stopped inside a
+    /// composite device. This is idempotent since the device may have
+    /// already been cleaned up by a udev removal event.
+    fn remove_stopped_source_device(&mut self, composite_path: &str, device_id: &str) {
+        self.source_devices_used.remove(device_id);
+        self.source_devices.remove(device_id);
+        if let Some(sources) = self.composite_device_sources.get_mut(composite_path) {
+            sources.retain(|(_, id)| id != device_id);
+        }
     }
 
     /// Called when a new device is detected by udev

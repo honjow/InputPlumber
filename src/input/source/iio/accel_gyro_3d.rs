@@ -2,24 +2,26 @@ use std::{collections::HashSet, error::Error, fmt::Debug, os::fd::RawFd, time::D
 
 use crate::{
     config,
-    drivers::iio_imu::{self, driver::Driver, info::MountMatrix},
+    drivers::iio_imu::{
+        driver::Driver,
+        info::{MountMatrix, TriggerStrategy},
+    },
     input::{
         capability::{Capability, Source},
-        event::{native::NativeEvent, value::InputValue},
+        event::native::NativeEvent,
         source::{InputError, SourceInputDevice, SourceOutputDevice},
     },
     udev::device::UdevDevice,
 };
 
+use super::common::{
+    corrections_from_config, mount_matrix_from_config, sample_rate_from_config, translate_events,
+    use_buffer_from_config,
+};
+
 const RESUME_RECOVER_DELAY: Duration = Duration::from_secs(3);
 
-// Scale from IIO SI units to Steam Deck UHID raw LSB.
-// IIO channels report m/s² for accel and rad/s for gyro after applying scale:
-//   https://www.kernel.org/doc/Documentation/ABI/testing/sysfs-bus-iio
-// UHID LSB constants from src/drivers/steam_deck/driver.rs.
-const ACCEL_SCALE_FACTOR: f64 = 1632.6530612244898; // 1 / 0.0006125 (m/s² → UHID LSB)
-const GYRO_SCALE_FACTOR: f64 = 916.7324722093172; // (180/π) / 0.0625 (rad/s → °/s → UHID LSB)
-
+#[derive(Debug)]
 pub struct AccelGyro3dImu {
     driver: Option<Driver>,
     capabilities: Vec<Capability>,
@@ -28,47 +30,31 @@ pub struct AccelGyro3dImu {
     mount_matrix: Option<MountMatrix>,
     use_buffer: Option<bool>,
     sample_rate: Option<f64>,
+    accel_correction: f64,
+    gyro_correction: f64,
     event_filter: HashSet<Capability>,
 }
 
 impl AccelGyro3dImu {
-    /// Create a new Accel Gyro 3D source device with the given udev
-    /// device information
+    /// Create a HID Sensor Hub source, retaining configuration for resume.
     pub fn new(
         device_info: UdevDevice,
-        config: Option<config::IIO>,
+        config: Option<config::SourceDevice>,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        // Override the mount matrix if one is defined in the config
-        let mount_matrix = if let Some(config) = config.as_ref() {
-            #[allow(deprecated)]
-            if let Some(matrix_config) = config.mount_matrix.as_ref() {
-                let matrix = MountMatrix {
-                    x: (matrix_config.x[0], matrix_config.x[1], matrix_config.x[2]),
-                    y: (matrix_config.y[0], matrix_config.y[1], matrix_config.y[2]),
-                    z: (matrix_config.z[0], matrix_config.z[1], matrix_config.z[2]),
-                };
-                Some(matrix)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        let use_buffer = config.as_ref().and_then(|c| c.use_buffer);
-        let sample_rate = config.as_ref().and_then(|c| c.sample_rate);
-
+        let mount_matrix = mount_matrix_from_config(config.as_ref());
+        let sample_rate = sample_rate_from_config(config.as_ref());
+        let use_buffer = use_buffer_from_config(config.as_ref());
+        let (accel_correction, gyro_correction) = corrections_from_config(config.as_ref());
         let id = device_info.sysname();
         let name = device_info.name();
         let driver = Driver::new(
             id.clone(),
-            name.clone(),
             mount_matrix.clone(),
             use_buffer,
             sample_rate,
+            TriggerStrategy::FindExisting,
         )?;
-
-        // accel and gyro may be separate IIO devices on HID Sensor Hub
+        // Sensor hubs may expose accelerometer and gyroscope as separate devices.
         let mut capabilities = vec![];
         if driver.has_accel() {
             capabilities.push(Capability::Accelerometer(Source::Center));
@@ -76,8 +62,6 @@ impl AccelGyro3dImu {
         if driver.has_gyro() {
             capabilities.push(Capability::Gyroscope(Source::Center));
         }
-        log::debug!("AccelGyro3dImu capabilities: {capabilities:?}");
-
         Ok(Self {
             driver: Some(driver),
             capabilities,
@@ -86,22 +70,25 @@ impl AccelGyro3dImu {
             mount_matrix,
             use_buffer,
             sample_rate,
+            accel_correction,
+            gyro_correction,
             event_filter: HashSet::new(),
         })
     }
 }
 
 impl SourceInputDevice for AccelGyro3dImu {
-    /// Poll the given input device for input events
     fn poll(&mut self) -> Result<Vec<NativeEvent>, InputError> {
-        let Some(ref mut driver) = self.driver else {
+        let Some(driver) = self.driver.as_mut() else {
             return Ok(vec![]);
         };
-        let events = driver.poll()?;
-        Ok(translate_events(events))
+        Ok(translate_events(
+            driver.poll()?,
+            self.accel_correction,
+            self.gyro_correction,
+        ))
     }
 
-    /// Returns the possible input events this device is capable of emitting
     fn get_capabilities(&self) -> Result<Vec<Capability>, InputError> {
         Ok(self.capabilities.clone())
     }
@@ -109,7 +96,7 @@ impl SourceInputDevice for AccelGyro3dImu {
     fn get_poll_fds(&self) -> Vec<RawFd> {
         self.driver
             .as_ref()
-            .and_then(|d| d.poll_fd())
+            .and_then(Driver::poll_fd)
             .into_iter()
             .collect()
     }
@@ -119,6 +106,7 @@ impl SourceInputDevice for AccelGyro3dImu {
             "Tearing down IIO driver for {} before suspend",
             self.device_name
         );
+        // Drops the raw fd, disables its buffer and unbinds/removes owned triggers.
         self.driver = None;
     }
 
@@ -126,89 +114,44 @@ impl SourceInputDevice for AccelGyro3dImu {
         if self.driver.is_some() {
             return;
         }
-
         log::info!(
             "Recreating IIO driver for {} after resume",
             self.device_name
         );
         std::thread::sleep(RESUME_RECOVER_DELAY);
-
         match Driver::new(
             self.device_id.clone(),
-            self.device_name.clone(),
             self.mount_matrix.clone(),
             self.use_buffer,
             self.sample_rate,
+            TriggerStrategy::FindExisting,
         ) {
-            Ok(mut new_driver) => {
-                new_driver.update_filtered_events(self.event_filter.clone());
+            Ok(mut driver) => {
+                driver.update_filtered_events(self.event_filter.clone());
+                self.driver = Some(driver);
                 log::info!("IIO driver recreated for {} after resume", self.device_name);
-                self.driver = Some(new_driver);
             }
-            Err(e) => {
-                log::error!(
-                    "Failed to recreate IIO driver for {}: {e}",
-                    self.device_name
-                );
-            }
+            Err(error) => log::error!(
+                "Failed to recreate IIO driver for {}: {error}",
+                self.device_name
+            ),
         }
     }
 
     fn update_event_filter(&mut self, events: HashSet<Capability>) -> Result<(), InputError> {
         self.event_filter = events.clone();
-        if let Some(ref mut driver) = self.driver {
+        if let Some(driver) = self.driver.as_mut() {
             driver.update_filtered_events(events);
         }
         Ok(())
     }
 
     fn get_default_event_filter(&self) -> Result<HashSet<Capability>, InputError> {
-        let Some(ref driver) = self.driver else {
-            return Ok(HashSet::new());
-        };
-        driver
-            .get_default_event_filter()
-            .map_err(|e| format!("Failed to get default event filter: {:?}", e).into())
+        match self.driver.as_ref() {
+            Some(driver) => Ok(driver.get_default_event_filter()?),
+            None => Ok(self.event_filter.clone()),
+        }
     }
 }
 
 impl SourceOutputDevice for AccelGyro3dImu {}
-
-impl Debug for AccelGyro3dImu {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AccelGyro3dImu").finish()
-    }
-}
-
-// NOTE: Mark this struct as thread-safe as it will only ever be called from
-// a single thread.
-unsafe impl Send for AccelGyro3dImu {}
-
-/// Translate the given driver events into native events
-fn translate_events(events: Vec<iio_imu::event::Event>) -> Vec<NativeEvent> {
-    events.into_iter().map(translate_event).collect()
-}
-
-/// Translate the given driver event into a native event
-fn translate_event(event: iio_imu::event::Event) -> NativeEvent {
-    match event {
-        iio_imu::event::Event::Accelerometer(data) => {
-            let cap = Capability::Accelerometer(Source::Center);
-            let value = InputValue::Vector3 {
-                x: Some(data.roll * ACCEL_SCALE_FACTOR),
-                y: Some(data.pitch * ACCEL_SCALE_FACTOR),
-                z: Some(data.yaw * ACCEL_SCALE_FACTOR),
-            };
-            NativeEvent::new(cap, value)
-        }
-        iio_imu::event::Event::Gyro(data) => {
-            let cap = Capability::Gyroscope(Source::Center);
-            let value = InputValue::Vector3 {
-                x: Some(data.roll * GYRO_SCALE_FACTOR),
-                y: Some(data.pitch * GYRO_SCALE_FACTOR),
-                z: Some(data.yaw * GYRO_SCALE_FACTOR),
-            };
-            NativeEvent::new(cap, value)
-        }
-    }
-}

@@ -14,28 +14,32 @@ use crate::{
     drivers::ultimate_2::{
         hid_report::{DPadDirection, PackedInputDataReport, PackedRumbleOutputReport},
         report_descriptor::REPORT_DESCRIPTOR,
-        ACCEL_SCALE, JOY_AXIS_MAX, JOY_AXIS_MIN, PID, REPORT_ID_RUMBLE, TRIGGER_AXIS_MAX, VID,
+        JOY_AXIS_MAX, JOY_AXIS_MIN, PID, REPORT_ID_RUMBLE, TRIGGER_AXIS_MAX,
+        ULTIMATE_2_MPS2_TO_ACCEL_RAW, ULTIMATE_2_RAD_S_TO_GYRO_RAW, VID,
     },
     input::{
-        capability::{Capability, Gamepad, GamepadAxis, GamepadButton, GamepadTrigger},
+        capability::{Capability, Gamepad, GamepadAxis, GamepadButton, GamepadTrigger, Source},
         composite_device::client::CompositeDeviceClient,
         event::{
             native::{NativeEvent, ScheduledNativeEvent},
-            value::InputValue,
-            value::{denormalize_signed_value_u8, denormalize_unsigned_value_u8},
+            value::{
+                denormalize_accel_value_i16, denormalize_gyro_value_i16,
+                denormalize_signed_value_u8, denormalize_unsigned_value_u8, InputValue,
+            },
         },
         output_capability::OutputCapability,
         output_event::OutputEvent,
+        target::generate_mac,
     },
 };
 
 use super::{InputError, OutputError, TargetInputDevice, TargetOutputDevice};
 
-const GRAVITY: f64 = 9.80665;
-
 // The minimum interval between button events must wait between
 // each other for chords.
 const MIN_CHORD_TIME: Duration = Duration::from_millis(80);
+
+const ULTIMATE2_BASE_MAC: [u8; 3] = [0x02, 0x2d, 0xc8];
 
 pub struct Ultimate2WirelessDevice {
     device: UHIDDevice<File>,
@@ -44,11 +48,16 @@ pub struct Ultimate2WirelessDevice {
 }
 
 impl Ultimate2WirelessDevice {
-    pub fn new() -> Result<Self, Box<dyn Error>> {
+    pub fn new(persistent_id: &str) -> Result<Self, Box<dyn Error>> {
+        let mac_addr = generate_mac(ULTIMATE2_BASE_MAC, persistent_id);
+        let uniq = format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            mac_addr[5], mac_addr[4], mac_addr[3], mac_addr[2], mac_addr[1], mac_addr[0],
+        );
         let device = UHIDDevice::create(CreateParams {
             name: String::from("8BitDo Ultimate 2 Wireless Controller"),
             phys: String::from(""),
-            uniq: String::from(""),
+            uniq,
             bus: Bus::USB,
             vendor: VID as u32,
             product: PID as u32,
@@ -186,64 +195,54 @@ impl Ultimate2WirelessDevice {
                     _ => (),
                 },
 
-                // Axis layout (x=pitch, y=yaw, z=roll): yaw/roll axes are swapped
-                // relative to SDL sGyro/sAccel naming; pitch is negated.
-                Gamepad::Accelerometer => {
-                    if let InputValue::Vector3 { x, y, z } = value {
-                        if let Some(x) = x {
-                            state.accel_y =
-                                Integer::from_primitive(denormalize_accel(x).wrapping_neg());
-                        }
-                        if let Some(y) = y {
-                            state.accel_z = Integer::from_primitive(denormalize_accel(y));
-                        }
-                        if let Some(z) = z {
-                            state.accel_x =
-                                Integer::from_primitive(denormalize_accel(z).wrapping_neg());
-                        }
-                    }
-                }
-
-                Gamepad::Gyro => {
-                    if let InputValue::Vector3 { x, y, z } = value {
-                        if let Some(x) = x {
-                            state.gyro_y = Integer::from_primitive((x as i16).wrapping_neg());
-                        }
-                        if let Some(y) = y {
-                            state.gyro_z = Integer::from_primitive(y as i16);
-                        }
-                        if let Some(z) = z {
-                            state.gyro_x = Integer::from_primitive((z as i16).wrapping_neg());
-                        }
-                    }
-                }
-
                 _ => (),
             },
 
             Capability::Gyroscope(_) => {
                 if let InputValue::Vector3 { x, y, z } = value {
+                    // Invert the SDL standard frame rotation so the wire fields
+                    // match a real Ultimate 2 for the same pose.
                     if let Some(x) = x {
-                        state.gyro_x = Integer::from_primitive(x as i16);
+                        state.gyro_y = Integer::from_primitive(
+                            denormalize_gyro_value_i16(x, ULTIMATE_2_RAD_S_TO_GYRO_RAW)
+                                .wrapping_neg(),
+                        );
                     }
                     if let Some(y) = y {
-                        state.gyro_y = Integer::from_primitive(y as i16);
+                        state.gyro_z = Integer::from_primitive(denormalize_gyro_value_i16(
+                            y,
+                            ULTIMATE_2_RAD_S_TO_GYRO_RAW,
+                        ));
                     }
                     if let Some(z) = z {
-                        state.gyro_z = Integer::from_primitive(z as i16);
+                        state.gyro_x = Integer::from_primitive(
+                            denormalize_gyro_value_i16(z, ULTIMATE_2_RAD_S_TO_GYRO_RAW)
+                                .wrapping_neg(),
+                        );
                     }
                 }
             }
             Capability::Accelerometer(_) => {
                 if let InputValue::Vector3 { x, y, z } = value {
+                    // Invert the SDL standard frame rotation so the wire fields
+                    // match a real Ultimate 2 for the same pose.
                     if let Some(x) = x {
-                        state.accel_x = Integer::from_primitive(x as i16);
+                        state.accel_y = Integer::from_primitive(
+                            denormalize_accel_value_i16(x, ULTIMATE_2_MPS2_TO_ACCEL_RAW)
+                                .wrapping_neg(),
+                        );
                     }
                     if let Some(y) = y {
-                        state.accel_y = Integer::from_primitive(y as i16);
+                        state.accel_z = Integer::from_primitive(denormalize_accel_value_i16(
+                            y,
+                            ULTIMATE_2_MPS2_TO_ACCEL_RAW,
+                        ));
                     }
                     if let Some(z) = z {
-                        state.accel_z = Integer::from_primitive(z as i16);
+                        state.accel_x = Integer::from_primitive(
+                            denormalize_accel_value_i16(z, ULTIMATE_2_MPS2_TO_ACCEL_RAW)
+                                .wrapping_neg(),
+                        );
                     }
                 }
             }
@@ -254,12 +253,16 @@ impl Ultimate2WirelessDevice {
 
     // Rumble output report format: [0x05, strong_hi, weak_hi, 0x00, 0x00]
     fn handle_output(&mut self, data: Vec<u8>) -> Result<Vec<OutputEvent>, Box<dyn Error>> {
+        Self::decode_output_report(&data)
+    }
+
+    fn decode_output_report(data: &[u8]) -> Result<Vec<OutputEvent>, Box<dyn Error>> {
         let Some(&report_id) = data.first() else {
             return Ok(vec![]);
         };
 
         if report_id == REPORT_ID_RUMBLE {
-            let buf: [u8; 5] = data.as_slice().try_into()?;
+            let buf: [u8; 5] = data.try_into()?;
             let report = PackedRumbleOutputReport::unpack(&buf)?;
             let strong_magnitude = (report.strong_magnitude as u16) << 8;
             let weak_magnitude = (report.weak_magnitude as u16) << 8;
@@ -341,8 +344,7 @@ impl TargetInputDevice for Ultimate2WirelessDevice {
 
     fn get_capabilities(&self) -> Result<Vec<Capability>, InputError> {
         Ok(vec![
-            Capability::Gamepad(Gamepad::Accelerometer),
-            Capability::Gamepad(Gamepad::Gyro),
+            Capability::Accelerometer(Source::Center),
             Capability::Gamepad(Gamepad::Button(GamepadButton::QuickAccess)),
             Capability::Gamepad(Gamepad::Button(GamepadButton::Screenshot)),
             Capability::Gamepad(Gamepad::Axis(GamepadAxis::LeftStick)),
@@ -370,6 +372,7 @@ impl TargetInputDevice for Ultimate2WirelessDevice {
             Capability::Gamepad(Gamepad::Button(GamepadButton::West)),
             Capability::Gamepad(Gamepad::Trigger(GamepadTrigger::LeftTrigger)),
             Capability::Gamepad(Gamepad::Trigger(GamepadTrigger::RightTrigger)),
+            Capability::Gyroscope(Source::Center),
         ])
     }
 
@@ -420,6 +423,7 @@ impl TargetOutputDevice for Ultimate2WirelessDevice {
         let output_events = match event {
             uhid_virt::OutputEvent::Start { dev_flags: _ } => {
                 log::debug!("Start event received");
+                self.write_state()?;
                 Ok(vec![])
             }
             uhid_virt::OutputEvent::Stop => {
@@ -428,6 +432,7 @@ impl TargetOutputDevice for Ultimate2WirelessDevice {
             }
             uhid_virt::OutputEvent::Open => {
                 log::debug!("Open event received");
+                self.write_state()?;
                 Ok(vec![])
             }
             uhid_virt::OutputEvent::Close => {
@@ -467,12 +472,6 @@ impl Debug for Ultimate2WirelessDevice {
             .field("state", &self.state)
             .finish()
     }
-}
-
-// m/s² → raw i16 (4096 units = 1G)
-fn denormalize_accel(value_m_s2: f64) -> i16 {
-    let g = value_m_s2 / GRAVITY;
-    (g * ACCEL_SCALE).clamp(i16::MIN as f64, i16::MAX as f64) as i16
 }
 
 #[cfg(test)]
@@ -528,5 +527,86 @@ mod report_tests {
         button(&mut state, GamepadButton::LeftTrigger, false);
         button(&mut state, GamepadButton::RightTrigger, false);
         assert_eq!(&state.pack().unwrap()[6..8], &[0, 0]);
+    }
+
+    #[test]
+    fn target_imu_uses_si_units_and_inverts_upstream_frame_once() {
+        use crate::drivers::ultimate_2::{GRAVITY_MPS2, ULTIMATE_2_GYRO_RAW_TO_RAD_S};
+        let mut state = PackedInputDataReport::default();
+        Ultimate2WirelessDevice::update_report(
+            &mut state,
+            NativeEvent::new(
+                Capability::Accelerometer(Source::Center),
+                InputValue::Vector3 {
+                    x: Some(GRAVITY_MPS2),
+                    y: Some(2.0 * GRAVITY_MPS2),
+                    z: Some(-GRAVITY_MPS2),
+                },
+            ),
+        );
+        assert_eq!(
+            (
+                i16::from(state.accel_x),
+                i16::from(state.accel_y),
+                i16::from(state.accel_z)
+            ),
+            (4096, -4096, 8192)
+        );
+        Ultimate2WirelessDevice::update_report(
+            &mut state,
+            NativeEvent::new(
+                Capability::Gyroscope(Source::Center),
+                InputValue::Vector3 {
+                    x: Some(100.0 * ULTIMATE_2_GYRO_RAW_TO_RAD_S),
+                    y: Some(200.0 * ULTIMATE_2_GYRO_RAW_TO_RAD_S),
+                    z: Some(-300.0 * ULTIMATE_2_GYRO_RAW_TO_RAD_S),
+                },
+            ),
+        );
+        assert_eq!(
+            (
+                i16::from(state.gyro_x),
+                i16::from(state.gyro_y),
+                i16::from(state.gyro_z)
+            ),
+            (300, -100, 200)
+        );
+    }
+
+    #[test]
+    fn target_trigger_channels_keep_physical_byte_order() {
+        let mut state = PackedInputDataReport::default();
+        button(&mut state, GamepadButton::LeftTrigger, true);
+        assert_eq!(&state.pack().unwrap()[6..8], &[0, 255]);
+        button(&mut state, GamepadButton::LeftTrigger, false);
+        Ultimate2WirelessDevice::update_report(
+            &mut state,
+            NativeEvent::new(
+                Capability::Gamepad(Gamepad::Trigger(GamepadTrigger::RightTrigger)),
+                InputValue::Float(0.5),
+            ),
+        );
+        assert_eq!(&state.pack().unwrap()[6..8], &[128, 0]);
+    }
+
+    #[test]
+    fn target_rumble_reports_keep_upstream_magnitudes_and_reject_short_payloads() {
+        let output =
+            Ultimate2WirelessDevice::decode_output_report(&[REPORT_ID_RUMBLE, 0x80, 0x40, 0, 0])
+                .unwrap();
+        assert!(matches!(
+            output.as_slice(),
+            [OutputEvent::GenericRumble {
+                strong_magnitude: 0x8000,
+                weak_magnitude: 0x4000
+            }]
+        ));
+        assert!(Ultimate2WirelessDevice::decode_output_report(&[REPORT_ID_RUMBLE, 1]).is_err());
+        assert!(Ultimate2WirelessDevice::decode_output_report(&[])
+            .unwrap()
+            .is_empty());
+        assert!(Ultimate2WirelessDevice::decode_output_report(&[0xff])
+            .unwrap()
+            .is_empty());
     }
 }

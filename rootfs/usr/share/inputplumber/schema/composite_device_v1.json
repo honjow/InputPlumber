@@ -286,6 +286,18 @@
       "properties": {
         "mount_matrix": {
           "$ref": "#/definitions/MountMatrix"
+        },
+        "sample_rate": {
+          "description": "Desired sampling rate in Hz.",
+          "type": "number"
+        },
+        "accel_correction": {
+          "description": "Multiplier applied to the kernel-reported accelerometer scale. Defaults to 1.0.",
+          "type": "number"
+        },
+        "gyro_correction": {
+          "description": "Multiplier applied to the kernel-reported gyroscope scale. Defaults to 1.0.",
+          "type": "number"
         }
       }
     },
@@ -433,7 +445,7 @@
           "type": "string"
         },
         "sample_rate": {
-          "description": "Desired IIO sampling rate in Hz.",
+          "description": "Deprecated: use config.imu.sample_rate for the desired sampling rate in Hz.",
           "type": "number"
         },
         "use_buffer": {

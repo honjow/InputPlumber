@@ -1,6 +1,8 @@
 //! Source: https://gitlab.com/open-sd/opensd/-/blob/main/src/opensdd/drivers/gamepad/hid_reports.hpp
 //! Source: https://github.com/torvalds/linux/blob/master/drivers/hid/hid-steam.c
 #![allow(warnings)]
+use std::time::Duration;
+
 use packed_struct::prelude::*;
 
 // Input report axis ranges
@@ -31,6 +33,41 @@ pub const TRIGG_AXIS_MULT: f64 = 1.0 / TRIGG_MAX;
 // Lengh of time for the thread to sleep before keyboard emulation
 // has to be disabled again with a CLEAR_MAPPINGS report.
 pub const LIZARD_SLEEP_SEC: f64 = 2.0;
+
+/// String attribute identifiers used by GetStringAttribute requests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum StringAttribute {
+    BoardSerial = 0,
+    #[default]
+    UnitSerial = 1,
+    /// Unrecognized attribute byte. Treated the same as [Self::UnitSerial].
+    Unknown(u8),
+}
+
+impl From<u8> for StringAttribute {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => Self::BoardSerial,
+            1 => Self::UnitSerial,
+            other => {
+                log::debug!("Unknown string attribute {other:#04x}, using unit serial");
+                Self::Unknown(other)
+            }
+        }
+    }
+}
+
+impl StringAttribute {
+    /// The raw byte the host requested, echoed back in the reply.
+    pub fn as_byte(self) -> u8 {
+        match self {
+            Self::BoardSerial => 0,
+            Self::UnitSerial => 1,
+            Self::Unknown(byte) => byte,
+        }
+    }
+}
 
 // From https://github.com/libsdl-org/SDL/blob/510c7edd9b53c6e1b826a2a009de24fcc4dfb2c1/src/joystick/hidapi/steam/controller_constants.h
 // TODO: These are universal for all Valve Controllers. When adding
@@ -611,23 +648,46 @@ pub struct PackedHapticPulseReport {
     #[packed_field(bytes = "2", ty = "enum")]
     pub side: PadSide,
     #[packed_field(bytes = "3..=4", endian = "lsb")]
-    pub amplitude: Integer<u16, packed_bits::Bits<16>>,
+    pub duration_us: Integer<u16, packed_bits::Bits<16>>,
     #[packed_field(bytes = "5..=6", endian = "lsb")]
-    pub period: Integer<u16, packed_bits::Bits<16>>,
+    pub interval_us: Integer<u16, packed_bits::Bits<16>>,
     #[packed_field(bytes = "7..=8", endian = "lsb")]
-    pub count: Integer<u16, packed_bits::Bits<16>>,
+    pub repeat_count: Integer<u16, packed_bits::Bits<16>>,
+    #[packed_field(bytes = "9")]
+    pub gain: i8,
 }
 
 impl PackedHapticPulseReport {
     pub fn new() -> Self {
         Self {
             report_id: ReportType::TriggerHapticPulse as u8,
-            report_size: 9,
+            report_size: 8,
             side: PadSide::Both,
-            amplitude: Integer::from_primitive(0),
-            period: Integer::from_primitive(0),
-            count: Integer::from_primitive(0),
+            duration_us: Integer::from_primitive(0),
+            interval_us: Integer::from_primitive(0),
+            repeat_count: Integer::from_primitive(0),
+            gain: 0,
         }
+    }
+
+    /// (weak, strong) rumble magnitudes for devices that must fake this pulse
+    /// with a plain on/off motor, derived from side and gain (dB, -24 to +6).
+    pub fn magnitudes(&self) -> (u16, u16) {
+        let normalized_gain = (self.gain as i16 + 24).clamp(0, 30) as f64 / 30.0;
+        let magnitude = (normalized_gain * u16::MAX as f64) as u16;
+        match self.side {
+            PadSide::Left => (0, magnitude),
+            PadSide::Right => (magnitude, 0),
+            PadSide::Both => (magnitude, magnitude),
+        }
+    }
+
+    /// Capped duration for devices that must schedule their own stop, since
+    /// duration_us * repeat_count can be huge or bogus.
+    pub fn capped_duration(&self) -> Duration {
+        let total_us =
+            self.duration_us.to_primitive() as u64 * self.repeat_count.to_primitive() as u64;
+        Duration::from_micros(total_us.clamp(50_000, 500_000))
     }
 }
 

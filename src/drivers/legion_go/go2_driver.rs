@@ -4,7 +4,7 @@ use std::{error::Error, ffi::CString};
 use hidapi::HidDevice;
 use packed_struct::PackedStruct;
 
-use crate::drivers::lego::HID_LENOVO_GO_FILTER;
+use crate::drivers::legion_go::HID_LENOVO_GO_FILTER;
 use crate::input::capability::{Capability, Source};
 use crate::udev::device::UdevDevice;
 
@@ -18,6 +18,28 @@ use super::{
     XINPUT_PACKET_SIZE,
 };
 
+/// Legion Go hardware generation
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegionGoGen {
+    Gen1,
+    Gen2,
+}
+
+// Checks DMI to determine hardware generation. Self contained implementation
+// avoids dependence on InputPlumber imports.
+pub fn get_legion_go_gen() -> Result<LegionGoGen, Box<dyn Error + Send + Sync>> {
+    let product_name = std::fs::read_to_string("/sys/class/dmi/id/product_name")
+        .unwrap_or_default()
+        .replace('\n', "");
+    match product_name.as_str() {
+        // Legion Go, see 50-legion_go.yaml.
+        "83E1" => Ok(LegionGoGen::Gen1),
+        // Legion Go 2, see 50-legion_go_2.yaml.
+        "83N0" | "83N1" => Ok(LegionGoGen::Gen2),
+        _ => Err(format!("unknown Legion Go DMI product name: {product_name}").into()),
+    }
+}
+
 pub struct Driver {
     /// HIDRAW device instance
     hid_device: HidDevice,
@@ -27,6 +49,8 @@ pub struct Driver {
     filtered_events: HashSet<Capability>,
     /// State for the internal gamepad controller
     state: Option<XInputDataReport>,
+    /// Hardware generation of this device
+    gen: LegionGoGen,
 }
 
 impl Driver {
@@ -48,6 +72,7 @@ impl Driver {
             udev_device,
             hid_device,
             filtered_events: Default::default(),
+            gen: get_legion_go_gen()?,
             state: None,
         })
     }
@@ -58,6 +83,10 @@ impl Driver {
     //Capability->Event/Event->Capability in the SourceDriver implementation.
     pub fn update_filtered_events(&mut self, events: HashSet<Capability>) {
         self.filtered_events = events;
+    }
+
+    pub fn gen(&self) -> LegionGoGen {
+        self.gen
     }
 
     pub fn get_default_event_filter(
@@ -161,13 +190,15 @@ impl Driver {
 
     /// Translate the state into individual events
     fn translate_xinput(&mut self, old_state: Option<XInputDataReport>) -> Vec<Event> {
-        Self::translate_xinput_state(self.state, old_state, &self.filtered_events)
+        Self::translate_xinput_state(self.state, old_state, &self.filtered_events, self.gen)
     }
 
+    // Keep the upstream generation-specific frame transforms replayable without HID hardware.
     fn translate_xinput_state(
         state: Option<XInputDataReport>,
         old_state: Option<XInputDataReport>,
         filtered_events: &HashSet<Capability>,
+        gen: LegionGoGen,
     ) -> Vec<Event> {
         let mut events = Vec::new();
         let Some(state) = state else {
@@ -435,8 +466,8 @@ impl Driver {
             {
                 events.push(Event::Axis(AxisEvent::RightAccel(ImuAxisInput {
                     pitch: -state.right_accel_x,
-                    roll: state.right_accel_y,
-                    yaw: -state.right_accel_z,
+                    roll: -state.right_accel_y,
+                    yaw: state.right_accel_z,
                 })))
             }
             if !filtered_events.contains(&Capability::Accelerometer(Source::Center))
@@ -449,8 +480,8 @@ impl Driver {
             {
                 events.push(Event::Axis(AxisEvent::MultiAccel(ImuAxisInput {
                     pitch: -(state.left_accel_x + state.right_accel_x) / 2,
-                    roll: (-state.left_accel_y + state.right_accel_y) / 2,
-                    yaw: -(state.left_accel_z + state.right_accel_z) / 2,
+                    roll: -(state.left_accel_y + state.right_accel_y) / 2,
+                    yaw: (-state.left_accel_z + state.right_accel_z) / 2,
                 })))
             }
             if !filtered_events.contains(&Capability::Gyroscope(Source::Left))
@@ -461,7 +492,10 @@ impl Driver {
                 events.push(Event::Axis(AxisEvent::LeftGyro(ImuAxisInput {
                     pitch: -state.left_gyro_x,
                     roll: -state.left_gyro_y,
-                    yaw: -state.left_gyro_z,
+                    yaw: match gen {
+                        LegionGoGen::Gen2 => -state.left_gyro_z,
+                        LegionGoGen::Gen1 => state.left_gyro_z,
+                    },
                 })))
             }
             if !filtered_events.contains(&Capability::Gyroscope(Source::Right))
@@ -471,7 +505,7 @@ impl Driver {
             {
                 events.push(Event::Axis(AxisEvent::RightGyro(ImuAxisInput {
                     pitch: -state.right_gyro_x,
-                    roll: state.right_gyro_y,
+                    roll: -state.right_gyro_y,
                     yaw: -state.right_gyro_z,
                 })))
             }
@@ -486,8 +520,11 @@ impl Driver {
             {
                 events.push(Event::Axis(AxisEvent::MultiGyro(ImuAxisInput {
                     pitch: -(state.left_gyro_x + state.right_gyro_x) / 2,
-                    roll: (-state.left_gyro_y + state.right_gyro_y) / 2,
-                    yaw: -(state.left_gyro_z + state.right_gyro_z) / 2,
+                    roll: -(state.left_gyro_y + state.right_gyro_y) / 2,
+                    yaw: match gen {
+                        LegionGoGen::Gen2 => -(state.left_gyro_z + state.right_gyro_z) / 2,
+                        LegionGoGen::Gen1 => (state.left_gyro_z - state.right_gyro_z) / 2,
+                    },
                 })))
             }
         }
@@ -515,7 +552,12 @@ mod imu_tests {
         state.right_gyro_x = 40;
         state.right_gyro_y = 50;
         state.right_gyro_z = 60;
-        let events = Driver::translate_xinput_state(Some(state), Some(old), &HashSet::new());
+        let events = Driver::translate_xinput_state(
+            Some(state),
+            Some(old),
+            &HashSet::new(),
+            LegionGoGen::Gen2,
+        );
         let vectors: Vec<_> = events
             .iter()
             .filter_map(|event| match event {
@@ -538,11 +580,11 @@ mod imu_tests {
             vectors,
             vec![
                 ("left_accel", -100, -200, -300),
-                ("right_accel", -400, 500, -600),
-                ("center_accel", -250, 150, -450),
+                ("right_accel", -400, -500, 600),
+                ("center_accel", -250, -350, 150),
                 ("left_gyro", -10, -20, -30),
-                ("right_gyro", -40, 50, -60),
-                ("center_gyro", -25, 15, -45),
+                ("right_gyro", -40, -50, -60),
+                ("center_gyro", -25, -35, -45),
             ]
         );
         let filter = HashSet::from([
@@ -553,6 +595,34 @@ mod imu_tests {
             Capability::Gyroscope(Source::Right),
             Capability::Gyroscope(Source::Center),
         ]);
-        assert!(Driver::translate_xinput_state(Some(state), Some(old), &filter).is_empty());
+        assert!(
+            Driver::translate_xinput_state(Some(state), Some(old), &filter, LegionGoGen::Gen2)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn shared_go_driver_keeps_generation_specific_left_gyro_yaw() {
+        let old = XInputDataReport::unpack(&[0; XINPUT_PACKET_SIZE]).unwrap();
+        let mut state = old;
+        state.left_gyro_z = 30;
+        state.right_gyro_z = 60;
+        for (gen, expected) in [
+            (LegionGoGen::Gen1, [30, -60, -15]),
+            (LegionGoGen::Gen2, [-30, -60, -45]),
+        ] {
+            let events =
+                Driver::translate_xinput_state(Some(state), Some(old), &HashSet::new(), gen);
+            let yaws: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Axis(
+                        AxisEvent::LeftGyro(v) | AxisEvent::RightGyro(v) | AxisEvent::MultiGyro(v),
+                    ) => Some(v.yaw),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(yaws, expected);
+        }
     }
 }

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, error::Error, fmt::Debug};
+use std::{collections::HashMap, error::Error, fmt::Debug, time::Instant};
 
 use evdev::{FFEffectData, FFEffectKind, InputEvent};
 use packed_struct::{types::SizedInteger, PrimitiveEnum};
@@ -6,7 +6,7 @@ use packed_struct::{types::SizedInteger, PrimitiveEnum};
 use crate::{
     drivers::{
         dualsense::hid_report::SetStatePackedOutputData,
-        legos::{
+        legion_go_s::{
             event, xinput_driver::XInputDriver, STICK_X_MAX, STICK_X_MIN, STICK_Y_MAX, STICK_Y_MIN,
             TRIGG_MAX,
         },
@@ -19,6 +19,7 @@ use crate::{
             value::InputValue,
             value::{normalize_signed_value, normalize_unsigned_value},
         },
+        output_capability::{Haptic, OutputCapability},
         output_event::OutputEvent,
         source::{InputError, OutputError, SourceInputDevice, SourceOutputDevice},
     },
@@ -26,12 +27,13 @@ use crate::{
 };
 
 /// Legion Go Controller source device implementation
-pub struct LegionSXInputController {
+pub struct LegionGoSXInputController {
     driver: XInputDriver,
     ff_evdev_effects: HashMap<i16, FFEffectData>,
+    haptic_timeout: Option<Instant>,
 }
 
-impl LegionSXInputController {
+impl LegionGoSXInputController {
     /// Create a new Legion controller source device with the given udev
     /// device information
     pub fn new(device_info: UdevDevice) -> Result<Self, Box<dyn Error + Send + Sync>> {
@@ -39,6 +41,7 @@ impl LegionSXInputController {
         Ok(Self {
             driver,
             ff_evdev_effects: HashMap::new(),
+            haptic_timeout: None,
         })
     }
 
@@ -148,9 +151,16 @@ impl LegionSXInputController {
     }
 }
 
-impl SourceInputDevice for LegionSXInputController {
+impl SourceInputDevice for LegionGoSXInputController {
     /// Poll the source device for input events
     fn poll(&mut self) -> Result<Vec<NativeEvent>, InputError> {
+        if let Some(stop_at) = self.haptic_timeout {
+            if Instant::now() >= stop_at {
+                self.haptic_timeout = None;
+                let _ = self.driver.haptic_rumble(0, 0);
+            }
+        }
+
         let events = self.driver.poll()?;
         let native_events = translate_events(events);
         Ok(native_events)
@@ -162,7 +172,15 @@ impl SourceInputDevice for LegionSXInputController {
     }
 }
 
-impl SourceOutputDevice for LegionSXInputController {
+impl SourceOutputDevice for LegionGoSXInputController {
+    fn get_output_capabilities(&self) -> Result<Vec<OutputCapability>, OutputError> {
+        Ok(vec![
+            OutputCapability::ForceFeedback,
+            OutputCapability::Haptics(Haptic::TrackpadLeft),
+            OutputCapability::Haptics(Haptic::TrackpadRight),
+        ])
+    }
+
     /// Write the given output event to the source device. Output events are
     /// events that flow from an application (like a game) to the physical
     /// input device, such as force feedback events.
@@ -180,6 +198,12 @@ impl SourceOutputDevice for LegionSXInputController {
             }
             OutputEvent::Uinput(_) => (),
             OutputEvent::SteamDeckHaptics(report) => self.process_haptic_ff(report)?,
+            OutputEvent::SteamDeckHapticPulse(report) => {
+                let (weak, strong) = report.magnitudes();
+                self.driver
+                    .haptic_rumble((strong / 256) as u8, (weak / 256) as u8)?;
+                self.haptic_timeout = Some(Instant::now() + report.capped_duration());
+            }
             OutputEvent::SteamDeckRumble(report) => {
                 let l_speed = (report.left_speed.to_primitive() / 256) as u8;
                 let r_speed = (report.right_speed.to_primitive() / 256) as u8;
@@ -199,9 +223,9 @@ impl SourceOutputDevice for LegionSXInputController {
     }
 }
 
-impl Debug for LegionSXInputController {
+impl Debug for LegionGoSXInputController {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LegionSController").finish()
+        f.debug_struct("LegionGoSController").finish()
     }
 }
 
@@ -374,7 +398,6 @@ fn translate_event(event: event::Event) -> NativeEvent {
 
 /// List of all capabilities that the Legion Go driver implements
 pub const CAPABILITIES: &[Capability] = &[
-    Capability::Gamepad(Gamepad::Accelerometer),
     Capability::Gamepad(Gamepad::Axis(GamepadAxis::LeftStick)),
     Capability::Gamepad(Gamepad::Axis(GamepadAxis::RightStick)),
     Capability::Gamepad(Gamepad::Button(GamepadButton::DPadDown)),
@@ -397,7 +420,6 @@ pub const CAPABILITIES: &[Capability] = &[
     Capability::Gamepad(Gamepad::Button(GamepadButton::South)),
     Capability::Gamepad(Gamepad::Button(GamepadButton::Start)),
     Capability::Gamepad(Gamepad::Button(GamepadButton::West)),
-    Capability::Gamepad(Gamepad::Gyro),
     Capability::Gamepad(Gamepad::Trigger(GamepadTrigger::LeftTrigger)),
     Capability::Gamepad(Gamepad::Trigger(GamepadTrigger::RightTrigger)),
 ];

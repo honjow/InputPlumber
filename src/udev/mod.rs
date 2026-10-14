@@ -5,6 +5,8 @@
 pub mod device_test;
 #[cfg(test)]
 mod restore_test;
+#[cfg(test)]
+mod rules_test;
 
 pub mod device;
 
@@ -61,6 +63,69 @@ pub enum HideFlag {
     MoveSourceDevice,
 }
 
+/// Format the two independent rule files without querying or changing devices.
+fn format_hide_rules(
+    name: &str,
+    subsystem: &str,
+    match_rule: &str,
+    permission_commands: Option<(&str, &str)>,
+    move_command: Option<&str>,
+) -> (String, String) {
+    let mut chmod_early_rule = String::new();
+    let mut chmod_late_rule = String::new();
+    if let Some((chmod_cmd, setfacl_cmd)) = permission_commands {
+        // Build the rule content
+        chmod_early_rule = format!(
+            r#"KERNEL=="js[0-9]*|event[0-9]*", SUBSYSTEM=="{subsystem}", MODE:="0000", GROUP:="root", RUN+="{chmod_cmd} 000 /dev/input/%k", RUN+="{setfacl_cmd} -b /dev/input/%k", SYMLINK+="inputplumber/by-hidden/%k"
+KERNEL=="hidraw[0-9]*", SUBSYSTEM=="{subsystem}", MODE:="0000", GROUP:="root", RUN+="{chmod_cmd} 000 /dev/%k", RUN+="{setfacl_cmd} -b /dev/%k", SYMLINK+="inputplumber/by-hidden/%k"
+"#
+        );
+        chmod_late_rule = format!(
+            r#"KERNEL=="js[0-9]*|event[0-9]*", SUBSYSTEM=="{subsystem}", MODE="000", GROUP="root", TAG-="uaccess", RUN+="{chmod_cmd} 000 /dev/input/%k", RUN+="{setfacl_cmd} -b /dev/input/%k"
+KERNEL=="hidraw[0-9]*", SUBSYSTEM=="{subsystem}", MODE="000", GROUP="root", TAG-="uaccess", RUN+="{chmod_cmd} 000 /dev/%k", RUN+="{setfacl_cmd} -b /dev/%k"
+"#
+        );
+    }
+
+    let mut mv_early_rule = String::new();
+    let mut mv_late_rule = String::new();
+    if let Some(mv_cmd) = move_command {
+        // Build the rule content
+        mv_early_rule = format!(
+            r#"KERNEL=="js[0-9]*|event[0-9]*", SUBSYSTEM=="{subsystem}", RUN+="{mv_cmd} /dev/input/%k /dev/inputplumber/sources/%k"
+KERNEL=="hidraw[0-9]*", SUBSYSTEM=="{subsystem}", RUN+="{mv_cmd} /dev/%k /dev/inputplumber/sources/%k"
+"#
+        );
+        mv_late_rule = mv_early_rule.clone();
+    }
+
+    // udev resolves GOTO targets only within the current file. Both stages
+    // match independently and run in normal rule-file order.
+    let early_rule = format!(
+        r#"# Hides devices stemming from {name}
+# Managed by InputPlumber, this file will be autoremoved during configuration changes.
+{match_rule}, GOTO="inputplumber_valid"
+GOTO="inputplumber_end"
+LABEL="inputplumber_valid"
+{chmod_early_rule}
+{mv_early_rule}
+LABEL="inputplumber_end"
+"#
+    );
+    let late_rule = format!(
+        r#"# Hides devices stemming from {name}
+# Managed by InputPlumber, this file will be autoremoved during configuration changes.
+{match_rule}, GOTO="inputplumber_valid"
+GOTO="inputplumber_end"
+LABEL="inputplumber_valid"
+{chmod_late_rule}
+{mv_late_rule}
+LABEL="inputplumber_end"
+"#
+    );
+    (early_rule, late_rule)
+}
+
 /// Hide the given input device from regular users.
 pub async fn hide_device(path: &str, flags: &[HideFlag]) -> Result<(), Box<dyn Error>> {
     // Get the device to hide
@@ -93,91 +158,50 @@ pub async fn hide_device(path: &str, flags: &[HideFlag]) -> Result<(), Box<dyn E
         }
     }
 
-    // Create the udev rule content to update permissions on the source node.
-    let mut chmod_early_rule = String::new();
-    let mut chmod_late_rule = String::new();
-    if flags.contains(&HideFlag::ChangePermissions) {
-        // Find the chmod command to use for hiding
+    // Find the commands used by the selected hide actions.
+    let permission_commands = if flags.contains(&HideFlag::ChangePermissions) {
         let Some(chmod_cmd) = find_executable("chmod") else {
             return Err("Unable to determine chmod command location".into());
         };
-        let chmod_cmd = chmod_cmd.to_string_lossy().to_string();
-        // Find the setfacl command to clear any facls as we are overwriting using chmod
         let Some(setfacl_cmd) = find_executable("setfacl") else {
             return Err("Unable to determine setfacl command location".into());
         };
-        let setfacl_cmd = setfacl_cmd.to_string_lossy().to_string();
-
-        // Build the rule content
-        chmod_early_rule = format!(
-            r#"KERNEL=="js[0-9]*|event[0-9]*", SUBSYSTEM=="{subsystem}", MODE:="0000", GROUP:="root", RUN+="{chmod_cmd} 000 /dev/input/%k", RUN+="{setfacl_cmd} -b /dev/input/%k", SYMLINK+="inputplumber/by-hidden/%k"
-KERNEL=="hidraw[0-9]*", SUBSYSTEM=="{subsystem}", MODE:="0000", GROUP:="root", RUN+="{chmod_cmd} 000 /dev/%k", RUN+="{setfacl_cmd} -b /dev/%k", SYMLINK+="inputplumber/by-hidden/%k"
-"#
-        );
-        chmod_late_rule = format!(
-            r#"KERNEL=="js[0-9]*|event[0-9]*", SUBSYSTEM=="{subsystem}", MODE="000", GROUP="root", TAG-="uaccess", RUN+="{chmod_cmd} 000 /dev/input/%k", RUN+="{setfacl_cmd} -b /dev/input/%k"
-KERNEL=="hidraw[0-9]*", SUBSYSTEM=="{subsystem}", MODE="000", GROUP="root", TAG-="uaccess", RUN+="{chmod_cmd} 000 /dev/%k", RUN+="{setfacl_cmd} -b /dev/%k"
-"#
-        );
-    }
-
-    // Create the udev rule content to move the device node
-    let mut mv_early_rule = String::new();
-    let mut mv_late_rule = String::new();
-    if flags.contains(&HideFlag::MoveSourceDevice) {
-        // Create the directory to move devnodes to
+        Some((
+            chmod_cmd.to_string_lossy().to_string(),
+            setfacl_cmd.to_string_lossy().to_string(),
+        ))
+    } else {
+        None
+    };
+    let move_command = if flags.contains(&HideFlag::MoveSourceDevice) {
         tokio::fs::create_dir_all("/dev/inputplumber/sources").await?;
-
-        // Find the mv command to use for hiding
         let Some(mv_cmd) = find_executable("mv") else {
             return Err("Unable to determine mv command location".into());
         };
-        let mv_cmd = mv_cmd.to_string_lossy().to_string();
-
-        // Build the rule content
-        mv_early_rule = format!(
-            r#"KERNEL=="js[0-9]*|event[0-9]*", SUBSYSTEM=="{subsystem}", RUN+="{mv_cmd} /dev/input/%k /dev/inputplumber/sources/%k"
-KERNEL=="hidraw[0-9]*", SUBSYSTEM=="{subsystem}", RUN+="{mv_cmd} /dev/%k /dev/inputplumber/sources/%k"
-"#
-        );
-        mv_late_rule = mv_early_rule.clone();
-    }
-
-    // Create an early udev rule to hide the device
-    let rule = format!(
-        r#"# Hides devices stemming from {name}
-# Managed by InputPlumber, this file will be autoremoved during configuration changes.
-{match_rule}, GOTO="inputplumber_valid"
-GOTO="inputplumber_end"
-LABEL="inputplumber_valid"
-{chmod_early_rule}
-{mv_early_rule}
-LABEL="inputplumber_end"
-"#
+        Some(mv_cmd.to_string_lossy().to_string())
+    } else {
+        None
+    };
+    let (early_rule, late_rule) = format_hide_rules(
+        &name,
+        &subsystem,
+        &match_rule,
+        permission_commands
+            .as_ref()
+            .map(|(chmod, setfacl)| (chmod.as_str(), setfacl.as_str())),
+        move_command.as_deref(),
     );
+
+    // Keep both hide stages in their existing positions in udev's rule order.
     fs::create_dir_all(RULES_PREFIX)?;
     let rule_path = format!(
         "{RULES_PREFIX}/{RULE_HIDE_DEVICE_EARLY_PRIORITY}-inputplumber-hide-{name}-early.rules"
     );
-    fs::write(rule_path, rule)?;
-
-    // Create a late udev rule to hide the device. This is needed for devices that
-    // are available at boot time because the early rule will not be applied.
-    let rule = format!(
-        r#"# Hides devices stemming from {name}
-# Managed by InputPlumber, this file will be autoremoved during configuration changes.
-{match_rule}, GOTO="inputplumber_valid"
-GOTO="inputplumber_end"
-LABEL="inputplumber_valid"
-{chmod_late_rule}
-{mv_late_rule}
-LABEL="inputplumber_end"
-"#
-    );
+    fs::write(rule_path, early_rule)?;
     let rule_path = format!(
         "{RULES_PREFIX}/{RULE_HIDE_DEVICE_LATE_PRIORITY}-inputplumber-hide-{name}-late.rules"
     );
-    fs::write(rule_path, rule)?;
+    fs::write(rule_path, late_rule)?;
 
     // Reload udev
     reload_children(parent).await?;

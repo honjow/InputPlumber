@@ -128,6 +128,34 @@ pub fn denormalize_unsigned_value_u8(normal_value: f64, max: f64) -> u8 {
     (normal_value * max).round() as u8
 }
 
+/// Converts an accelerometer value from m/s² to a raw device count.
+pub fn denormalize_accel_value_i16(value_mps2: f64, mps2_to_raw: f64) -> i16 {
+    let raw = (value_mps2 * mps2_to_raw).round();
+    if raw.is_nan() || raw < i16::MIN as f64 || raw > i16::MAX as f64 {
+        log::warn!("Accelerometer value {value_mps2} m/s² is out of i16 range ({raw}), clamping");
+    }
+    raw as i16
+}
+
+/// Converts a gyroscope value from rad/s to a raw device count.
+pub fn denormalize_gyro_value_i16(value_rad_s: f64, rad_s_to_raw: f64) -> i16 {
+    let raw = (value_rad_s * rad_s_to_raw).round();
+    if raw.is_nan() || raw < i16::MIN as f64 || raw > i16::MAX as f64 {
+        log::warn!("Gyroscope value {value_rad_s} rad/s is out of i16 range ({raw}), clamping");
+    }
+    raw as i16
+}
+
+/// Converts a raw accelerometer device count to m/s².
+pub fn normalize_accel_value_i16(raw: i16, raw_to_mps2: f64) -> f64 {
+    raw as f64 * raw_to_mps2
+}
+
+/// Converts a raw gyroscope device count to rad/s.
+pub fn normalize_gyro_value_i16(raw: i16, raw_to_rad_s: f64) -> f64 {
+    raw as f64 * raw_to_rad_s
+}
+
 impl InputValue {
     /// Returns whether or not the value is "pressed"
     pub fn pressed(&self) -> bool {
@@ -194,10 +222,6 @@ impl InputValue {
                                 Gamepad::Axis(_) => self.translate_button_to_axis(target_config),
                                 // Gamepad Button -> Trigger
                                 Gamepad::Trigger(_) => Ok(self.translate_button_to_trigger()),
-                                // Gamepad Button -> Accelerometer
-                                Gamepad::Accelerometer => Err(TranslationError::NotImplemented),
-                                // Gamepad Button -> Gyro
-                                Gamepad::Gyro => Err(TranslationError::NotImplemented),
                                 Gamepad::Dial(_) => Ok(self.clone()),
                             },
                             // Gamepad Button -> Mouse
@@ -282,10 +306,6 @@ impl InputValue {
                                 }
                                 // Axis -> Trigger
                                 Gamepad::Trigger(_) => Err(TranslationError::NotImplemented),
-                                // Axis -> Accelerometer
-                                Gamepad::Accelerometer => Err(TranslationError::NotImplemented),
-                                // Axis -> Gyro
-                                Gamepad::Gyro => Err(TranslationError::NotImplemented),
                                 Gamepad::Dial(_) => Err(TranslationError::NotImplemented),
                             },
                             // Axis -> Mouse
@@ -331,10 +351,6 @@ impl InputValue {
                             }
                             // Trigger -> Trigger
                             Gamepad::Trigger(_) => Ok(self.clone()),
-                            // Trigger -> Accelerometer
-                            Gamepad::Accelerometer => Err(TranslationError::NotImplemented),
-                            // Trigger -> Gyro
-                            Gamepad::Gyro => Err(TranslationError::NotImplemented),
                             Gamepad::Dial(_) => self.translate_trigger_to_button(source_config),
                         },
                         // Trigger -> Mouse
@@ -360,10 +376,6 @@ impl InputValue {
                         // Trigger -> Accelerometer
                         Capability::Accelerometer(_) => Err(TranslationError::NotImplemented),
                     },
-                    // Accelerometer -> ...
-                    Gamepad::Accelerometer => Err(TranslationError::NotImplemented),
-                    // Gyro -> ...
-                    Gamepad::Gyro => Err(TranslationError::NotImplemented),
                     // Dial mapping to -> ..
                     Gamepad::Dial(_) => match target_cap {
                         Capability::None => Ok(InputValue::None),
@@ -374,8 +386,6 @@ impl InputValue {
                             Gamepad::Button(_) => self.translate_dial_to_button(source_config),
                             Gamepad::Axis(_) => Err(TranslationError::NotImplemented),
                             Gamepad::Trigger(_) => Err(TranslationError::NotImplemented),
-                            Gamepad::Accelerometer => Err(TranslationError::NotImplemented),
-                            Gamepad::Gyro => Err(TranslationError::NotImplemented),
                             Gamepad::Dial(_) => Ok(self.clone()),
                         },
                         Capability::Mouse(mouse) => match mouse {
@@ -418,8 +428,6 @@ impl InputValue {
                     Gamepad::Button(_) => Ok(self.clone()),
                     Gamepad::Axis(_) => Err(TranslationError::NotImplemented),
                     Gamepad::Trigger(_) => Err(TranslationError::NotImplemented),
-                    Gamepad::Accelerometer => Err(TranslationError::NotImplemented),
-                    Gamepad::Gyro => Err(TranslationError::NotImplemented),
                     Gamepad::Dial(_) => Ok(self.clone()),
                 },
                 // Keyboard Key -> Mouse
@@ -1230,8 +1238,6 @@ impl InputValue {
                 Gamepad::Button(_) => Ok(self.clone()),
                 Gamepad::Axis(_) => self.translate_button_to_axis(target_config),
                 Gamepad::Trigger(_) => Ok(self.translate_button_to_trigger()),
-                Gamepad::Accelerometer => Err(TranslationError::NotImplemented),
-                Gamepad::Gyro => Err(TranslationError::NotImplemented),
                 Gamepad::Dial(_) => Ok(self.clone()),
             },
             Capability::Mouse(mouse) => match mouse {

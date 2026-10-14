@@ -25,6 +25,37 @@ use crate::{
 
 use super::client::CompositeDeviceClient;
 
+/// Creation and attachment can finish in either order: manager attachment
+/// messages may arrive before the background creation task reports completion.
+#[derive(Debug, Default)]
+struct TargetCreationState {
+    in_progress: bool,
+    waiting_for_attachment: HashSet<String>,
+    pending_devices: Option<Vec<TargetDeviceTypeId>>,
+}
+
+impl TargetCreationState {
+    fn is_pending(&self) -> bool {
+        self.in_progress || !self.waiting_for_attachment.is_empty()
+    }
+
+    fn finish<T>(&mut self, paths: Vec<String>, attached: &HashMap<String, T>) {
+        self.in_progress = false;
+        self.waiting_for_attachment.extend(
+            paths
+                .into_iter()
+                .filter(|path| !attached.contains_key(path)),
+        );
+    }
+
+    fn take_pending_devices(&mut self) -> Option<Vec<TargetDeviceTypeId>> {
+        if self.is_pending() {
+            return None;
+        }
+        self.pending_devices.take()
+    }
+}
+
 /// Manages target devices for a composite device
 #[derive(Debug)]
 pub struct CompositeDeviceTargets {
@@ -44,10 +75,8 @@ pub struct CompositeDeviceTargets {
     /// so its transmitter channel can be looked up in `target_devices`.
     /// E.g. {Capability::Keyboard: ["/org/shadowblip/InputPlumber/devices/target/keyboard0"]}
     target_devices_by_capability: HashMap<Capability, HashSet<String>>,
-    /// List of target devices waiting to be attached to this composite device.
-    /// This is used to block/requeue multiple calls to set_target_devices().
-    /// E.g. ["/org/shadowblip/InputPlumber/devices/target/gamepad0"]
-    target_devices_queued: HashSet<String>,
+    /// Coordinates asynchronous creation and attachment with deferred requests.
+    target_creation: TargetCreationState,
     /// List of active target device types (e.g. "deck", "ds5", "xb360") that
     /// were active before system suspend.
     target_devices_suspended: Vec<TargetDeviceTypeId>,
@@ -84,7 +113,7 @@ impl CompositeDeviceTargets {
             manager,
             target_devices: Default::default(),
             target_devices_by_capability: Default::default(),
-            target_devices_queued: Default::default(),
+            target_creation: TargetCreationState::default(),
             target_devices_suspended: Default::default(),
             target_dbus_devices: Default::default(),
             has_touchscreen_source,
@@ -142,6 +171,7 @@ impl CompositeDeviceTargets {
     pub async fn set_devices(
         &mut self,
         mut device_types: Vec<TargetDeviceTypeId>,
+        persistent_id: &str,
     ) -> Result<(), Box<dyn Error>> {
         let dbus_path = self.path.as_str();
 
@@ -165,18 +195,12 @@ impl CompositeDeviceTargets {
         }
 
         // Check to see if there are target device attachments pending. If so,
-        // requeue this set_target_devices request.
-        if !self.target_devices_queued.is_empty() {
+        // defer this request until that work is done.
+        if self.target_creation.is_pending() {
             log::debug!(
-                "[{dbus_path}] Target devices already waiting for attachment. Re-queueing set target devices.",
+                "[{dbus_path}] Target devices are being created or attached. Deferring set target devices.",
             );
-            let device = self.device.clone();
-            let dbus_path = dbus_path.to_string();
-            tokio::task::spawn(async move {
-                if let Err(e) = device.set_target_devices(device_types).await {
-                    log::error!("[{dbus_path}] Error setting target devices! {e:?}");
-                }
-            });
+            self.target_creation.pending_devices = Some(device_types);
             return Ok(());
         }
 
@@ -209,36 +233,50 @@ impl CompositeDeviceTargets {
             targets_to_stop.insert(path, target.clone());
         }
 
-        // Stop all old target devices that aren't going to persist
-        let mut stop_tasks = JoinSet::new();
-        for (path, target) in targets_to_stop.clone().into_iter() {
-            log::debug!("[{dbus_path}] Stopping old target device: {path}");
-            self.target_devices.remove(&path);
+        // Remove old targets from the routing maps; stop and create run in the background
+        for path in targets_to_stop.keys() {
+            self.target_devices.remove(path);
             for target_devices in self.target_devices_by_capability.values_mut() {
-                target_devices.remove(&path);
-            }
-            stop_tasks.spawn(async move { target.stop().await });
-        }
-        for result in stop_tasks.join_all().await {
-            if let Err(e) = result {
-                log::error!("[{dbus_path}] Failed to stop old target device: {e}");
+                target_devices.remove(path);
             }
         }
 
-        // Create new target devices using the input manager. Spawn a task for
-        // each create request so they can be performed simultaneously.
-        let mut tasks: JoinSet<Result<String, Box<dyn Error + Send + Sync>>> = JoinSet::new();
-        for kind in device_types_to_start {
-            let dbus_path = dbus_path.to_owned();
-            let manager = self.manager.clone();
-            let composite_path = self.path.clone();
+        self.target_creation.in_progress = true;
 
-            // Spawn a task that requests creating a new target device.
-            tasks.spawn(async move {
+        let manager = self.manager.clone();
+        let composite_path = self.path.clone();
+        let device = self.device.clone();
+        let persistent_id = persistent_id.to_string();
+        tokio::task::spawn(async move {
+            let dbus_path = composite_path.as_str();
+
+            // Stop all old target devices that aren't going to persist
+            for (path, target) in targets_to_stop {
+                log::debug!("[{dbus_path}] Stopping old target device: {path}");
+                if let Err(e) = target.stop().await {
+                    log::error!("[{dbus_path}] Failed to stop old target device: {e}");
+                }
+            }
+
+            // Create new target devices using the input manager. Spawn a task
+            // for each create request so they can be performed simultaneously.
+            let mut tasks: JoinSet<Result<String, Box<dyn Error + Send + Sync>>> = JoinSet::new();
+            for kind in device_types_to_start {
+                let dbus_path = dbus_path.to_owned();
+                let manager = manager.clone();
+                let composite_path = composite_path.clone();
+                let persistent_id = Some(persistent_id.clone());
+
+                // Spawn a task that requests creating a new target device.
+                tasks.spawn(async move {
                 // Ask the input manager to create a target device
                 log::debug!("[{dbus_path}] Requesting to create device: {kind}");
                 let (sender, mut receiver) = mpsc::channel(1);
-                let create_cmd = ManagerCommand::CreateTargetDevice { kind, sender };
+                let create_cmd = ManagerCommand::CreateTargetDevice {
+                    kind,
+                    persistent_id,
+                    sender,
+                };
                 manager.send(create_cmd).await?;
                 let Some(response) = receiver.recv().await else {
                     log::warn!("[{dbus_path}] Channel closed waiting for response from input manager");
@@ -279,29 +317,42 @@ impl CompositeDeviceTargets {
 
                 Ok(target_path)
             });
-        }
+            }
 
-        // Wait for all target devices to be created
-        for result in tasks.join_all().await {
-            let target_path = match result {
-                Ok(path) => path,
-                Err(e) => {
-                    log::error!("[{dbus_path}] Failed to create target device: {e}");
-                    continue;
-                }
-            };
+            let mut created_paths = vec![];
+            for result in tasks.join_all().await {
+                let target_path = match result {
+                    Ok(path) => path,
+                    Err(e) => {
+                        log::error!("[{dbus_path}] Failed to create target device: {e}");
+                        continue;
+                    }
+                };
 
-            // Enqueue the target device to wait for the attachment message from
-            // the input manager to prevent multiple calls to set_target_devices()
-            // from mangling attachment.
-            self.target_devices_queued.insert(target_path);
-        }
+                created_paths.push(target_path);
+            }
 
-        // Signal change in target devices to DBus
-        // TODO: Check this
-        //self.signal_targets_changed().await;
+            // Notify the composite device to clear the creation flag and
+            // enqueue the created target devices
+            if let Err(e) = device.target_devices_created(created_paths).await {
+                log::error!("[{dbus_path}] Failed to notify target device creation: {e:?}");
+            }
+        });
 
         Ok(())
+    }
+
+    /// Called when the spawned target device creation task finishes. Clears
+    /// the creation flag and enqueues the created target devices to wait for
+    /// their attachment message.
+    pub fn finish_target_creation(&mut self, paths: Vec<String>) {
+        self.target_creation.finish(paths, &self.target_devices);
+    }
+
+    /// Take the deferred set target devices request, if any and if no target
+    /// devices are being created or waiting for attachment.
+    pub fn take_pending_set_devices(&mut self) -> Option<Vec<TargetDeviceTypeId>> {
+        self.target_creation.take_pending_devices()
     }
 
     /// Return a list of currently running target devices
@@ -552,7 +603,7 @@ impl CompositeDeviceTargets {
             }
 
             // Add the target device
-            self.target_devices_queued.remove(&path);
+            self.target_creation.waiting_for_attachment.remove(&path);
             self.target_devices.insert(path.clone(), target);
         }
 
@@ -607,7 +658,7 @@ impl CompositeDeviceTargets {
 
     /// Called when notified by the input manager that system resume is about
     /// to happen.
-    pub async fn handle_resume(&mut self) {
+    pub async fn handle_resume(&mut self, persistent_id: &str) {
         let dbus_path = self.path.as_str();
         log::info!(
             "[{dbus_path}] Restoring target devices: {:?}",
@@ -617,7 +668,7 @@ impl CompositeDeviceTargets {
         // Set the target devices back to the ones used before suspend
         let target_devices = self.target_devices_suspended.clone();
         self.target_devices_suspended.clear();
-        if let Err(err) = self.set_devices(target_devices).await {
+        if let Err(err) = self.set_devices(target_devices, persistent_id).await {
             log::error!("Failed to set restore target devices: {err:?}");
         }
     }
@@ -652,5 +703,58 @@ impl CompositeDeviceTargets {
                 log::error!("[{dbus_path}] Failed to send target devices changed signal: {e}");
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod creation_tests {
+    use super::*;
+
+    #[test]
+    fn attachment_before_creation_completion_does_not_block_next_request() {
+        let next = vec!["ds5".try_into().unwrap()];
+        let mut state = TargetCreationState {
+            in_progress: true,
+            pending_devices: Some(next.clone()),
+            ..Default::default()
+        };
+        assert!(state.take_pending_devices().is_none());
+        let attached = HashMap::from([("gamepad0".into(), ())]);
+        state.finish(vec!["gamepad0".into()], &attached);
+        assert_eq!(state.take_pending_devices(), Some(next));
+        assert!(!state.is_pending());
+    }
+
+    #[test]
+    fn creation_before_attachment_waits_for_all_targets() {
+        let next = vec!["deck".try_into().unwrap()];
+        let mut state = TargetCreationState {
+            in_progress: true,
+            pending_devices: Some(next.clone()),
+            ..Default::default()
+        };
+        state.finish(
+            vec!["gamepad0".into(), "touchscreen0".into()],
+            &HashMap::<String, ()>::new(),
+        );
+        assert!(state.take_pending_devices().is_none());
+        state.waiting_for_attachment.remove("gamepad0");
+        assert!(state.take_pending_devices().is_none());
+        state.waiting_for_attachment.remove("touchscreen0");
+        assert_eq!(state.take_pending_devices(), Some(next));
+        assert!(state.take_pending_devices().is_none());
+    }
+
+    #[test]
+    fn failed_creation_releases_latest_deferred_request() {
+        let mut state = TargetCreationState {
+            in_progress: true,
+            pending_devices: Some(vec!["deck".try_into().unwrap()]),
+            ..Default::default()
+        };
+        let latest = vec!["ds5".try_into().unwrap()];
+        state.pending_devices = Some(latest.clone());
+        state.finish(Vec::new(), &HashMap::<String, ()>::new());
+        assert_eq!(state.take_pending_devices(), Some(latest));
     }
 }

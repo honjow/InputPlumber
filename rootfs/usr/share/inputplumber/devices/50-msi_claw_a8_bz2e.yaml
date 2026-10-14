@@ -25,6 +25,7 @@ source_devices:
   # Face Quick Access
   - group: keyboard
     udev:
+      dev_node: "/dev/input/event*"
       attributes:
         - name: name
           value: "AT Translated Set 2 keyboard"
@@ -44,6 +45,7 @@ source_devices:
   # Face Guide
   - group: keyboard
     udev:
+      dev_node: "/dev/input/event*"
       attributes:
         - name: name
           value: "MSI WMI hotkeys"
@@ -58,6 +60,7 @@ source_devices:
   # Xinput Gamepad
   - group: gamepad
     udev:
+      dev_node: "/dev/input/event*"
       properties:
         - name: ID_INPUT_JOYSTICK
           value: "1"
@@ -72,6 +75,7 @@ source_devices:
   # Xinput Mkey Extra Buttons
   - group: gamepad
     udev:
+      dev_node: "/dev/input/event*"
       properties:
         - name: ID_INPUT_KEYBOARD
           value: "1"
@@ -93,6 +97,7 @@ source_devices:
   - group: gamepad
     blocked: true
     udev:
+      dev_node: "/dev/input/event*"
       properties:
         - name: ID_INPUT_JOYSTICK
           value: "1"
@@ -113,6 +118,7 @@ source_devices:
   # Dinput Mkey Extra Buttons
   - group: gamepad
     udev:
+      dev_node: "/dev/input/event*"
       properties:
         - name: ID_INPUT_KEYBOARD
           value: "1"
@@ -130,23 +136,33 @@ source_devices:
         - Keyboard:KeyLeftBrace
         - Keyboard:KeyRightBrace
 
-  # IMU (AMD SFH via hid_sensor_gyro_3d / hid_sensor_accel_3d)
-  # NOTE: The stock amd_sfh kernel driver (sfh1_1/amd_sfh_desc.c) has integer
-  # division errors (/100 for accel, /1000 for gyro) that destroy precision.
-  # A kernel patch changing these to /10 is required for usable IMU data.
-  #
-  # use_buffer is disabled because AMD SFH's data-ready trigger fires at a
-  # fixed ~5 Hz regardless of the configured sampling_frequency, making
-  # buffer mode too slow for real-time gyroscope input. Sysfs polling reads
-  # cached values instantly and provides much better responsiveness.
-  - group: imu
-    iio:
-      name: accel_3d
-      use_buffer: false
+  # IMU (AMD SFH)
+  # Preserve direct sysfs polling: the AMD SFH buffer trigger can be too slow
+  # for gamepad motion. Keep the upstream SI scale corrections and orientation.
   - group: imu
     iio:
       name: gyro_3d
       use_buffer: false
+    config:
+      imu:
+        mount_matrix:
+          x: [1, 0, 0]
+          y: [0, 0, 1]
+          z: [0, 1, 0]
+        accel_correction: 10.0 # adm_sfh rdesktop scale compensation
+        gyro_correction: 100.0
+  - group: imu
+    iio:
+      name: accel_3d
+      use_buffer: false
+    config:
+      imu:
+        mount_matrix:
+          x: [-1, 0, 0]
+          y: [0, 0, 1]
+          z: [0, -1, 0]
+        accel_correction: 10.0 # adm_sfh rdesktop scale compensation
+        gyro_correction: 100.0
 
 # Optional configuration for the composite device
 options:

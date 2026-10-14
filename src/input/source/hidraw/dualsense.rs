@@ -1,14 +1,22 @@
 use std::fmt::Debug;
+use std::time::Instant;
 use std::{collections::HashMap, error::Error};
 
 use evdev::{FFEffectData, FFEffectKind};
 use packed_struct::types::SizedInteger;
 
-use crate::drivers::dualsense::driver::{DS5_EDGE_PID, DS5_PID, DS5_VID};
+use crate::drivers::dualsense::{
+    DS5_EDGE_PID, DS5_PID, DS5_TOUCHPAD_HEIGHT, DS5_TOUCHPAD_WIDTH, DS5_VID, STICK_X_MAX,
+    STICK_X_MIN, STICK_Y_MAX, STICK_Y_MIN, TRIGGER_MAX,
+};
 use crate::drivers::steam_deck::hid_report::PackedRumbleReport;
-use crate::input::output_capability::{OutputCapability, LED};
+use crate::input::capability::Source;
+use crate::input::output_capability::{Haptic, OutputCapability, LED};
 use crate::{
-    drivers::dualsense::{self, driver::Driver},
+    drivers::dualsense::{
+        self,
+        driver::{AxisCalibration, Driver},
+    },
     input::{
         capability::{
             Capability, Gamepad, GamepadAxis, GamepadButton, GamepadTrigger, Touch, TouchButton,
@@ -34,6 +42,7 @@ pub const PIDS: [u16; 2] = [DS5_EDGE_PID, DS5_PID];
 pub struct DualSenseController {
     driver: Driver,
     ff_evdev_effects: HashMap<i16, FFEffectData>,
+    haptic_timeout: Option<Instant>,
 }
 
 impl DualSenseController {
@@ -44,6 +53,7 @@ impl DualSenseController {
         Ok(Self {
             driver,
             ff_evdev_effects: HashMap::new(),
+            haptic_timeout: None,
         })
     }
 
@@ -147,8 +157,19 @@ impl DualSenseController {
 impl SourceInputDevice for DualSenseController {
     /// Poll the given input device for input events
     fn poll(&mut self) -> Result<Vec<NativeEvent>, InputError> {
+        if let Some(stop_at) = self.haptic_timeout {
+            if Instant::now() >= stop_at {
+                self.haptic_timeout = None;
+                let _ = self.driver.rumble(0, 0);
+            }
+        }
+
         let events = self.driver.poll()?;
-        let native_events = translate_events(events);
+        let calibration = Calibration {
+            accel: self.driver.accel_calibration(),
+            gyro: self.driver.gyro_calibration(),
+        };
+        let native_events = translate_events(events, calibration);
 
         Ok(native_events)
     }
@@ -179,6 +200,13 @@ impl SourceOutputDevice for DualSenseController {
             }
             OutputEvent::Uinput(_) => Ok(()),
             OutputEvent::SteamDeckHaptics(_report) => Ok(()),
+            OutputEvent::SteamDeckHapticPulse(report) => {
+                let (weak, strong) = report.magnitudes();
+                self.driver
+                    .rumble((strong / 256) as u8, (weak / 256) as u8)?;
+                self.haptic_timeout = Some(Instant::now() + report.capped_duration());
+                Ok(())
+            }
             OutputEvent::SteamDeckRumble(report) => {
                 log::debug!("Received Steam Deck FFB Output Report");
                 if let Err(e) = self.process_deck_ff(report) {
@@ -234,13 +262,26 @@ impl Debug for DualSenseController {
     }
 }
 
+/// Per-axis accelerometer/gyroscope calibration read from the device.
+#[derive(Debug, Clone, Copy)]
+struct Calibration {
+    accel: [AxisCalibration; 3],
+    gyro: [AxisCalibration; 3],
+}
+
 /// Translate the given DualSense events into native events
-fn translate_events(events: Vec<dualsense::event::Event>) -> Vec<NativeEvent> {
-    events.into_iter().map(translate_event).collect()
+fn translate_events(
+    events: Vec<dualsense::event::Event>,
+    calibration: Calibration,
+) -> Vec<NativeEvent> {
+    events
+        .into_iter()
+        .map(|event| translate_event(event, calibration))
+        .collect()
 }
 
 /// Translate the given DualSense event into a native event
-fn translate_event(event: dualsense::event::Event) -> NativeEvent {
+fn translate_event(event: dualsense::event::Event, calibration: Calibration) -> NativeEvent {
     match event {
         dualsense::event::Event::Button(button) => match button {
             dualsense::event::ButtonEvent::Cross(value) => NativeEvent::new(
@@ -336,21 +377,21 @@ fn translate_event(event: dualsense::event::Event) -> NativeEvent {
                 InputValue::Bool(value.pressed),
             ),
         },
-        dualsense::event::Event::Accelerometer(accel) => match accel {
-            dualsense::event::AccelerometerEvent::Accelerometer(value) => NativeEvent::new(
-                Capability::Gamepad(Gamepad::Accelerometer),
+        dualsense::event::Event::Inertia(inertia) => match inertia {
+            dualsense::event::InertialEvent::Accelerometer(value) => NativeEvent::new(
+                Capability::Accelerometer(Source::Center),
                 InputValue::Vector3 {
-                    x: Some(value.x as f64),
-                    y: Some(value.y as f64),
-                    z: Some(value.z as f64),
+                    x: Some(calibration.accel[0].apply(value.x)),
+                    y: Some(calibration.accel[1].apply(value.y)),
+                    z: Some(calibration.accel[2].apply(value.z)),
                 },
             ),
-            dualsense::event::AccelerometerEvent::Gyro(value) => NativeEvent::new(
-                Capability::Gamepad(Gamepad::Gyro),
+            dualsense::event::InertialEvent::Gyroscope(value) => NativeEvent::new(
+                Capability::Gyroscope(Source::Center),
                 InputValue::Vector3 {
-                    x: Some(value.x as f64),
-                    y: Some(value.y as f64),
-                    z: Some(value.z as f64),
+                    x: Some(calibration.gyro[0].apply(value.x)),
+                    y: Some(calibration.gyro[1].apply(value.y)),
+                    z: Some(calibration.gyro[2].apply(value.z)),
                 },
             ),
         },
@@ -386,12 +427,12 @@ fn translate_event(event: dualsense::event::Event) -> NativeEvent {
 fn normalize_axis_value(event: &dualsense::event::AxisEvent) -> InputValue {
     match event {
         dualsense::event::AxisEvent::Pad(value) => {
-            let max = dualsense::driver::DS5_TOUCHPAD_WIDTH;
+            let max = DS5_TOUCHPAD_WIDTH;
 
             let x = normalize_unsigned_value(value.x as f64, max);
             let x = Some(x);
 
-            let max = dualsense::driver::DS5_TOUCHPAD_HEIGHT;
+            let max = DS5_TOUCHPAD_HEIGHT;
             let y = normalize_unsigned_value(value.y as f64, max);
             let y = Some(y);
 
@@ -404,26 +445,26 @@ fn normalize_axis_value(event: &dualsense::event::AxisEvent) -> InputValue {
             }
         }
         dualsense::event::AxisEvent::LStick(value) => {
-            let min = dualsense::driver::STICK_X_MIN;
-            let max = dualsense::driver::STICK_X_MAX;
+            let min = STICK_X_MIN;
+            let max = STICK_X_MAX;
             let x = normalize_signed_value(value.x as f64, min, max);
             let x = Some(x);
 
-            let min = dualsense::driver::STICK_Y_MIN;
-            let max = dualsense::driver::STICK_Y_MAX;
+            let min = STICK_Y_MIN;
+            let max = STICK_Y_MAX;
             let y = normalize_signed_value(value.y as f64, min, max);
             let y = Some(y);
 
             InputValue::Vector2 { x, y }
         }
         dualsense::event::AxisEvent::RStick(value) => {
-            let min = dualsense::driver::STICK_X_MIN;
-            let max = dualsense::driver::STICK_X_MAX;
+            let min = STICK_X_MIN;
+            let max = STICK_X_MAX;
             let x = normalize_signed_value(value.x as f64, min, max);
             let x = Some(x);
 
-            let min = dualsense::driver::STICK_Y_MIN;
-            let max = dualsense::driver::STICK_Y_MAX;
+            let min = STICK_Y_MIN;
+            let max = STICK_Y_MAX;
             let y = normalize_signed_value(value.y as f64, min, max);
             let y = Some(y);
 
@@ -437,11 +478,11 @@ fn normalize_axis_value(event: &dualsense::event::AxisEvent) -> InputValue {
 fn normalize_trigger_value(event: &dualsense::event::TriggerEvent) -> InputValue {
     match event {
         dualsense::event::TriggerEvent::L2(value) => {
-            let max = dualsense::driver::TRIGGER_MAX;
+            let max = TRIGGER_MAX;
             InputValue::Float(normalize_unsigned_value(value.value as f64, max))
         }
         dualsense::event::TriggerEvent::R2(value) => {
-            let max = dualsense::driver::TRIGGER_MAX;
+            let max = TRIGGER_MAX;
             InputValue::Float(normalize_unsigned_value(value.value as f64, max))
         }
     }
@@ -449,7 +490,7 @@ fn normalize_trigger_value(event: &dualsense::event::TriggerEvent) -> InputValue
 
 /// List of all capabilities that the DualSense driver implements
 pub const CAPABILITIES: &[Capability] = &[
-    Capability::Gamepad(Gamepad::Accelerometer),
+    Capability::Accelerometer(Source::Center),
     Capability::Gamepad(Gamepad::Axis(GamepadAxis::LeftStick)),
     Capability::Gamepad(Gamepad::Axis(GamepadAxis::RightStick)),
     Capability::Gamepad(Gamepad::Button(GamepadButton::DPadDown)),
@@ -476,9 +517,9 @@ pub const CAPABILITIES: &[Capability] = &[
     Capability::Gamepad(Gamepad::Button(GamepadButton::South)),
     Capability::Gamepad(Gamepad::Button(GamepadButton::Start)),
     Capability::Gamepad(Gamepad::Button(GamepadButton::West)),
-    Capability::Gamepad(Gamepad::Gyro),
     Capability::Gamepad(Gamepad::Trigger(GamepadTrigger::LeftTrigger)),
     Capability::Gamepad(Gamepad::Trigger(GamepadTrigger::RightTrigger)),
+    Capability::Gyroscope(Source::Center),
     Capability::Touchpad(Touchpad::CenterPad(Touch::Button(TouchButton::Press))),
     Capability::Touchpad(Touchpad::CenterPad(Touch::Button(TouchButton::Touch))),
     Capability::Touchpad(Touchpad::CenterPad(Touch::Motion)),
@@ -487,4 +528,6 @@ pub const CAPABILITIES: &[Capability] = &[
 pub const OUTPUT_CAPABILITIES: &[OutputCapability] = &[
     OutputCapability::ForceFeedback,
     OutputCapability::LED(LED::Color),
+    OutputCapability::Haptics(Haptic::TrackpadLeft),
+    OutputCapability::Haptics(Haptic::TrackpadRight),
 ];

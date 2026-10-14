@@ -169,6 +169,7 @@ fn required_keys_config_accepts_new_and_legacy_profiles() {
 }
 
 #[test]
+#[allow(deprecated)] // Verify backward compatibility intentionally.
 fn iio_buffer_options_and_msi_sfh_policy_are_preserved() {
     let default: super::IIO = serde_yaml::from_str("name: accel_3d").unwrap();
     assert_eq!(default.use_buffer, None);

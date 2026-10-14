@@ -17,25 +17,29 @@ use crate::{
     config::CompositeDeviceConfig,
     drivers::steam_deck::{
         hid_report::{
-            PackedHapticReport, PackedInputDataReport, PackedRumbleReport, ReportType,
-            PAD_FORCE_MAX, PAD_X_MAX, PAD_X_MIN, PAD_Y_MAX, PAD_Y_MIN, STICK_FORCE_MAX,
-            STICK_X_MAX, STICK_X_MIN, STICK_Y_MAX, STICK_Y_MIN, TRIGG_MAX,
+            PackedHapticPulseReport, PackedHapticReport, PackedInputDataReport, PackedRumbleReport,
+            ReportType, StringAttribute, PAD_FORCE_MAX, PAD_X_MAX, PAD_X_MIN, PAD_Y_MAX, PAD_Y_MIN,
+            STICK_FORCE_MAX, STICK_X_MAX, STICK_X_MIN, STICK_Y_MAX, STICK_Y_MIN, TRIGG_MAX,
         },
         report_descriptor::CONTROLLER_DESCRIPTOR,
-        ProductId, VID,
+        ProductId, DECK_MPS2_TO_ACCEL_RAW, DECK_RAD_S_TO_GYRO_RAW, VID,
     },
     input::{
         capability::{
-            Capability, Gamepad, GamepadAxis, GamepadButton, GamepadTrigger, Touch, TouchButton,
-            Touchpad,
+            Capability, Gamepad, GamepadAxis, GamepadButton, GamepadTrigger, Source, Touch,
+            TouchButton, Touchpad,
         },
         composite_device::client::CompositeDeviceClient,
         event::{
             native::{NativeEvent, ScheduledNativeEvent},
-            value::{denormalize_signed_value_i16, denormalize_unsigned_value_u16, InputValue},
+            value::{
+                denormalize_accel_value_i16, denormalize_gyro_value_i16,
+                denormalize_signed_value_i16, denormalize_unsigned_value_u16, InputValue,
+            },
         },
         output_capability::{Haptic, OutputCapability},
         output_event::OutputEvent,
+        target::{generate_deck_board_serial, generate_deck_serial},
     },
 };
 
@@ -49,6 +53,7 @@ use super::{
 const MIN_CHORD_TIME: Duration = Duration::from_millis(80);
 
 pub struct SteamDeckUhidDevice {
+    board_serial: String,
     chip_id: [u8; 15],
     config: SteamDeckConfig,
     config_rx: Option<Receiver<SteamDeckConfig>>,
@@ -58,18 +63,26 @@ pub struct SteamDeckUhidDevice {
     device: Option<UHIDDevice<File>>,
     lizard_mode_enabled: bool,
     queued_events: Vec<ScheduledNativeEvent>,
+    /// Which string attribute the last GetStringAttribute SetReport asked for.
+    requested_string_attribute: StringAttribute,
     serial_number: String,
     state: PackedInputDataReport,
 }
 
 impl SteamDeckUhidDevice {
-    pub fn new() -> Result<Self, Box<dyn Error>> {
-        SteamDeckUhidDevice::new_with_config(SteamDeckConfig::default())
+    pub fn new(persistent_id: &str) -> Result<Self, Box<dyn Error>> {
+        SteamDeckUhidDevice::new_with_config(SteamDeckConfig::default(), persistent_id)
     }
 
     /// Create a new emulated Steam Deck device with the given configuration.
-    pub fn new_with_config(config: SteamDeckConfig) -> Result<Self, Box<dyn Error>> {
+    pub fn new_with_config(
+        config: SteamDeckConfig,
+        persistent_id: &str,
+    ) -> Result<Self, Box<dyn Error>> {
+        let serial_number = generate_deck_serial(persistent_id);
+        let board_serial = generate_deck_board_serial(persistent_id);
         Ok(Self {
+            board_serial,
             chip_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4],
             config,
             config_rx: None,
@@ -77,17 +90,21 @@ impl SteamDeckUhidDevice {
             device: None,
             lizard_mode_enabled: false,
             queued_events: vec![],
-            serial_number: "1NPU7PLUMB3R".to_string(),
+            requested_string_attribute: StringAttribute::default(),
+            serial_number,
             state: PackedInputDataReport::default(),
         })
     }
 
     /// Create the virtual device to emulate
-    fn create_virtual_device(config: &SteamDeckConfig) -> Result<UHIDDevice<File>, Box<dyn Error>> {
+    fn create_virtual_device(
+        config: &SteamDeckConfig,
+        serial_number: &str,
+    ) -> Result<UHIDDevice<File>, Box<dyn Error>> {
         let device = UHIDDevice::create(CreateParams {
             name: config.name.clone(),
             phys: String::from(""),
-            uniq: String::from(""),
+            uniq: serial_number.to_string(),
             bus: Bus::USB,
             vendor: VID as u32,
             product: config.product_id.to_u32(),
@@ -283,32 +300,6 @@ impl SteamDeckUhidDevice {
                         }
                     }
                 },
-                Gamepad::Accelerometer => {
-                    if let InputValue::Vector3 { x, y, z } = value {
-                        if let Some(x) = x {
-                            self.state.accel_x = Integer::from_primitive(x as i16);
-                        }
-                        if let Some(y) = y {
-                            self.state.accel_y = Integer::from_primitive(y as i16);
-                        }
-                        if let Some(z) = z {
-                            self.state.accel_z = Integer::from_primitive(z as i16);
-                        }
-                    }
-                }
-                Gamepad::Gyro => {
-                    if let InputValue::Vector3 { x, y, z } = value {
-                        if let Some(x) = x {
-                            self.state.pitch = Integer::from_primitive(x as i16);
-                        }
-                        if let Some(y) = y {
-                            self.state.yaw = Integer::from_primitive(y as i16);
-                        }
-                        if let Some(z) = z {
-                            self.state.roll = Integer::from_primitive(z as i16);
-                        }
-                    }
-                }
                 _ => (),
             },
             Capability::Touchpad(touch) => match touch {
@@ -379,26 +370,44 @@ impl SteamDeckUhidDevice {
             Capability::Gyroscope(_) => {
                 if let InputValue::Vector3 { x, y, z } = value {
                     if let Some(x) = x {
-                        self.state.pitch = Integer::from_primitive(x as i16);
+                        self.state.pitch = Integer::from_primitive(denormalize_gyro_value_i16(
+                            x,
+                            DECK_RAD_S_TO_GYRO_RAW,
+                        ));
                     }
                     if let Some(y) = y {
-                        self.state.yaw = Integer::from_primitive(y as i16);
+                        self.state.roll = Integer::from_primitive(denormalize_gyro_value_i16(
+                            y,
+                            DECK_RAD_S_TO_GYRO_RAW,
+                        ));
                     }
                     if let Some(z) = z {
-                        self.state.roll = Integer::from_primitive(z as i16);
+                        self.state.yaw = Integer::from_primitive(denormalize_gyro_value_i16(
+                            -z,
+                            DECK_RAD_S_TO_GYRO_RAW,
+                        ));
                     }
                 }
             }
             Capability::Accelerometer(_) => {
                 if let InputValue::Vector3 { x, y, z } = value {
                     if let Some(x) = x {
-                        self.state.accel_x = Integer::from_primitive(x as i16);
+                        self.state.accel_x = Integer::from_primitive(denormalize_accel_value_i16(
+                            x,
+                            DECK_MPS2_TO_ACCEL_RAW,
+                        ));
                     }
                     if let Some(y) = y {
-                        self.state.accel_y = Integer::from_primitive(y as i16);
+                        self.state.accel_z = Integer::from_primitive(denormalize_accel_value_i16(
+                            y,
+                            DECK_MPS2_TO_ACCEL_RAW,
+                        ));
                     }
                     if let Some(z) = z {
-                        self.state.accel_z = Integer::from_primitive(z as i16);
+                        self.state.accel_y = Integer::from_primitive(denormalize_accel_value_i16(
+                            -z,
+                            DECK_MPS2_TO_ACCEL_RAW,
+                        ));
                     }
                 }
             }
@@ -503,11 +512,19 @@ impl SteamDeckUhidDevice {
                 data.to_vec()
             }
             ReportType::GetStringAttribute => {
-                // Reply with the serial number
-                // [ReportType::GetSerial, 0x14, 0x01, ..serial?]?
-                log::debug!("Sending serial number: {}", self.serial_number);
-                let mut data = vec![0x0, ReportType::GetStringAttribute as u8, 0x14, 0x01];
-                let mut serial_data = self.serial_number.as_bytes().to_vec();
+                let attribute = self.requested_string_attribute;
+                let value = match attribute {
+                    StringAttribute::BoardSerial => &self.board_serial,
+                    _ => &self.serial_number,
+                };
+                log::debug!("Sending {attribute:?}: {value}");
+                let mut serial_data = value.as_bytes().to_vec();
+                let mut data = vec![
+                    0x0,
+                    ReportType::GetStringAttribute as u8,
+                    serial_data.len() as u8,
+                    attribute.as_byte(),
+                ];
                 data.append(&mut serial_data);
                 data.resize(64, 0);
                 data
@@ -559,6 +576,15 @@ impl SteamDeckUhidDevice {
         // uhid has an extra byte prepended, remove it.
         data.remove(0);
         let output_events = match self.current_report {
+            ReportType::GetStringAttribute => {
+                let attribute = data
+                    .get(2)
+                    .map(|byte| StringAttribute::from(*byte))
+                    .unwrap_or_default();
+                log::debug!("String attribute requested: {attribute:?}");
+                self.requested_string_attribute = attribute;
+                vec![]
+            }
             ReportType::TriggerHapticCommand => {
                 let buf = data.as_slice().try_into()?;
                 let packed_haptic_report = match PackedHapticReport::unpack(buf) {
@@ -571,6 +597,21 @@ impl SteamDeckUhidDevice {
                 log::trace!("Got PackedHapticReport: {packed_haptic_report}");
                 let event = OutputEvent::SteamDeckHaptics(packed_haptic_report);
                 vec![event]
+            }
+            ReportType::TriggerHapticPulse => {
+                let buf = data
+                    .get(..10)
+                    .ok_or("Buffer too short for PackedHapticPulseReport")?
+                    .try_into()?;
+                let report = match PackedHapticPulseReport::unpack(buf) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        log::error!("Got error unpacking buffer as PackedHapticPulseReport {e:?}");
+                        return Ok(vec![]);
+                    }
+                };
+                log::debug!("Got PackedHapticPulseReport: {report:?}");
+                vec![OutputEvent::SteamDeckHapticPulse(report)]
             }
             ReportType::TriggerRumbleCommand => {
                 let buf = data.as_slice().try_into()?;
@@ -734,7 +775,7 @@ impl TargetInputDevice for SteamDeckUhidDevice {
 
     fn get_capabilities(&self) -> Result<Vec<Capability>, InputError> {
         Ok(vec![
-            Capability::Gamepad(Gamepad::Accelerometer),
+            Capability::Accelerometer(Source::Center),
             Capability::Gamepad(Gamepad::Axis(GamepadAxis::LeftStick)),
             Capability::Gamepad(Gamepad::Axis(GamepadAxis::RightStick)),
             Capability::Gamepad(Gamepad::Button(GamepadButton::DPadDown)),
@@ -762,13 +803,13 @@ impl TargetInputDevice for SteamDeckUhidDevice {
             Capability::Gamepad(Gamepad::Button(GamepadButton::South)),
             Capability::Gamepad(Gamepad::Button(GamepadButton::Start)),
             Capability::Gamepad(Gamepad::Button(GamepadButton::West)),
-            Capability::Gamepad(Gamepad::Gyro),
             Capability::Gamepad(Gamepad::Trigger(GamepadTrigger::LeftStickForce)),
             Capability::Gamepad(Gamepad::Trigger(GamepadTrigger::LeftTouchpadForce)),
             Capability::Gamepad(Gamepad::Trigger(GamepadTrigger::LeftTrigger)),
             Capability::Gamepad(Gamepad::Trigger(GamepadTrigger::RightStickForce)),
             Capability::Gamepad(Gamepad::Trigger(GamepadTrigger::RightTouchpadForce)),
             Capability::Gamepad(Gamepad::Trigger(GamepadTrigger::RightTrigger)),
+            Capability::Gyroscope(Source::Center),
             Capability::Touchpad(Touchpad::LeftPad(Touch::Button(TouchButton::Press))),
             Capability::Touchpad(Touchpad::LeftPad(Touch::Button(TouchButton::Touch))),
             Capability::Touchpad(Touchpad::LeftPad(Touch::Motion)),
@@ -824,15 +865,11 @@ impl TargetOutputDevice for SteamDeckUhidDevice {
                     TryRecvError::Disconnected => self.config.clone(),
                 },
             };
-            let device = SteamDeckUhidDevice::create_virtual_device(&config)?;
+            let device =
+                SteamDeckUhidDevice::create_virtual_device(&config, self.serial_number.as_ref())?;
             self.device = Some(device);
             self.config = config;
             self.config_rx = None;
-            self.serial_number = format!(
-                "{:04x?}-{:04x?}-1ae1c0b",
-                VID,
-                self.config.product_id.to_u32()
-            );
         }
 
         let Some(device) = self.device.as_mut() else {

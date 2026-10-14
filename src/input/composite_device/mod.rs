@@ -87,6 +87,10 @@ pub enum InterceptMode {
     GamepadOnly,
 }
 
+/// The minimum time permitted between DOWN and UP button events for
+/// userspace to see a valid input.
+const MIN_EVENT_TIME: Duration = Duration::from_millis(16);
+
 /// A [CompositeDevice] represents any number source input devices that
 /// can translate input to any target devices
 #[derive(Debug)]
@@ -120,7 +124,7 @@ pub struct CompositeDevice {
     /// List of currently "pressed" actions used to translate multiple input
     /// sequences into a single input event.
     translatable_active_inputs: Vec<Capability>,
-    /// List of translated events that were emitted less than 8ms ago. This
+    /// List of translated events within the minimum observable interval. This
     /// is required to support "on release" style buttons on some devices where
     /// a button "up" event will fire immediately after a "down" event upon
     /// physical release of the button.
@@ -137,6 +141,8 @@ pub struct CompositeDevice {
     tx: mpsc::Sender<CompositeCommand>,
     /// Receiver channel for listening for commands
     rx: mpsc::Receiver<CompositeCommand>,
+    /// Channel for sending commands to the manager, must never be awaited.
+    manager: mpsc::Sender<ManagerCommand>,
     /// Map of source device id to their respective transmitter channel.
     /// E.g. {"evdev://event0": <Sender>}
     source_devices: HashMap<String, SourceDeviceClient>,
@@ -155,6 +161,10 @@ pub struct CompositeDevice {
     /// List of unique identifiers for each source device.
     /// E.g. {"evdev://event0": Some("abc123")}
     source_device_persistent_ids: HashMap<String, Option<String>>,
+    /// First valid persistent id resolved from a source device. Once set,
+    /// this is used for all target device identity so it stays stable
+    /// across suspend/resume and source device changes.
+    persistent_id: Option<String>,
     /// Unique identifiers for running source devices. E.g. ["evdev://event0"]
     source_devices_used: Vec<String>,
     /// State of target devices attached to the composite device
@@ -199,8 +209,13 @@ impl CompositeDevice {
         let (tx, rx) = mpsc::channel(BUFFER_SIZE);
         let name = config.name.clone();
         let dbus = DBusInterfaceManager::new(conn.clone(), dbus_path.clone())?;
-        let targets =
-            CompositeDeviceTargets::new(conn, dbus_path, tx.clone().into(), manager, &config);
+        let targets = CompositeDeviceTargets::new(
+            conn,
+            dbus_path,
+            tx.clone().into(),
+            manager.clone(),
+            &config,
+        );
         let mut device = Self {
             dbus,
             config,
@@ -221,6 +236,7 @@ impl CompositeDevice {
             intercept_mode: InterceptMode::None,
             tx: tx.clone(),
             rx,
+            manager: manager.clone(),
             source_devices: HashMap::new(),
             source_devices_discovered: Vec::new(),
             source_devices_to_hide: Vec::new(),
@@ -228,6 +244,7 @@ impl CompositeDevice {
             source_device_paths: Vec::new(),
             source_device_tasks: JoinSet::new(),
             source_device_persistent_ids: HashMap::new(),
+            persistent_id: None,
             source_devices_used: Vec::new(),
             targets,
             ff_enabled: true,
@@ -389,8 +406,19 @@ impl CompositeDevice {
                         }
                     }
                     CompositeCommand::SourceDeviceAdded(device) => {
+                        let id = device.get_id();
                         if let Err(e) = self.on_source_device_added(device).await {
-                            log::error!("Failed to add source device: {:?}", e);
+                            log::error!("Failed to add source device: {e:?}");
+                            // Notify the manager so it can free the config entry
+                            // this source device was holding
+                            if let Err(e) =
+                                self.manager.try_send(ManagerCommand::SourceDeviceStopped {
+                                    composite_path: self.dbus.path().to_string(),
+                                    device_id: id,
+                                })
+                            {
+                                log::error!("Failed to send source device stopped command: {e:?}");
+                            }
                         }
                     }
                     CompositeCommand::SourceDeviceStopped(device) => {
@@ -407,13 +435,34 @@ impl CompositeDevice {
                         }
                     }
                     CompositeCommand::SetTargetDevices(target_types) => {
-                        if let Err(e) = self.targets.set_devices(target_types).await {
+                        let persistent_id = self.get_persistent_id().await;
+                        if let Err(e) = self.targets.set_devices(target_types, &persistent_id).await
+                        {
                             log::error!("Failed to set target devices: {e}");
+                        }
+                    }
+                    CompositeCommand::TargetDevicesCreated(paths) => {
+                        self.targets.finish_target_creation(paths);
+                        if let Some(target_types) = self.targets.take_pending_set_devices() {
+                            let persistent_id = self.get_persistent_id().await;
+                            if let Err(e) =
+                                self.targets.set_devices(target_types, &persistent_id).await
+                            {
+                                log::error!("Failed to set target devices: {e}");
+                            }
                         }
                     }
                     CompositeCommand::AttachTargetDevices(targets) => {
                         if let Err(e) = self.targets.attach_devices(targets).await {
                             log::error!("Failed to attach target devices: {e:?}");
+                        }
+                        if let Some(target_types) = self.targets.take_pending_set_devices() {
+                            let persistent_id = self.get_persistent_id().await;
+                            if let Err(e) =
+                                self.targets.set_devices(target_types, &persistent_id).await
+                            {
+                                log::error!("Failed to set target devices: {e}");
+                            }
                         }
                     }
                     CompositeCommand::GetName(sender) => {
@@ -558,8 +607,12 @@ impl CompositeDevice {
                         }
                     }
                     CompositeCommand::Resume(sender) => {
-                        log::info!("Preparing to resume devices for: {}", self.dbus.path());
-                        self.targets.handle_resume().await;
+                        log::info!(
+                            "Preparing to resume target devices for: {}",
+                            self.dbus.path()
+                        );
+                        let persistent_id = self.get_persistent_id().await;
+                        self.targets.handle_resume(&persistent_id).await;
                         for (id, source) in self.source_devices.iter() {
                             if let Err(e) = source.resume().await {
                                 log::error!("Failed to resume source device {id}: {e:?}");
@@ -577,8 +630,8 @@ impl CompositeDevice {
                         }
                     }
                     CompositeCommand::GetPersistentId(sender) => {
-                        let persist_id = self.get_persistent_id().await.unwrap_or_default();
-                        if let Err(e) = sender.send(persist_id).await {
+                        let persistent_id = self.get_persistent_id().await;
+                        if let Err(e) = sender.send(persistent_id).await {
                             log::error!("Failed to send persistent id response: {e}");
                         }
                     }
@@ -1005,10 +1058,7 @@ impl CompositeDevice {
                         }
                     }
                     Gamepad::Dial(_) => {}
-                    Gamepad::Axis(_)
-                    | Gamepad::Trigger(_)
-                    | Gamepad::Accelerometer
-                    | Gamepad::Gyro => {}
+                    Gamepad::Axis(_) | Gamepad::Trigger(_) => {}
                 },
                 Capability::Mouse(ref t) => match t {
                     Mouse::Motion => {}
@@ -1137,28 +1187,6 @@ impl CompositeDevice {
             return Ok(());
         }
 
-        //TODO: Temporary force of all Gyro and Accel events to legacy Gamepad:: format.
-        // Remove this after targets can handle translation profiles.
-        if matches!(cap, Capability::Accelerometer(_)) {
-            let event = NativeEvent::new_translated(
-                cap,
-                Capability::Gamepad(Gamepad::Accelerometer),
-                event.get_value(),
-            );
-            self.targets.write_event(event).await;
-            return Ok(());
-        }
-
-        if matches!(cap, Capability::Gyroscope(_)) {
-            let event = NativeEvent::new_translated(
-                cap,
-                Capability::Gamepad(Gamepad::Gyro),
-                event.get_value(),
-            );
-            self.targets.write_event(event).await;
-            return Ok(());
-        }
-
         // Write the event to all target devices capable of handling the event
         self.targets.write_event(event).await;
 
@@ -1171,13 +1199,12 @@ impl CompositeDevice {
         self.is_new_active_event(&cap, event.pressed());
         // Check to see if the event is in recently translated.
         // If it is, spawn a task to delay emit the event.
-        let sleep_time = Duration::from_millis(4);
         let cap = event.as_capability();
-        if self.translated_recent_events.contains(&cap) {
+        if self.translated_recent_events.contains(&cap) && !event.pressed() {
             log::debug!("Event emitted too quickly. Delaying emission.");
             let tx = self.tx.clone();
             tokio::task::spawn(async move {
-                tokio::time::sleep(sleep_time).await;
+                tokio::time::sleep(MIN_EVENT_TIME).await;
                 if let Err(e) = tx.send(CompositeCommand::WriteEvent(event)).await {
                     log::error!("Failed to send delayed event command: {:?}", e);
                 }
@@ -1192,7 +1219,7 @@ impl CompositeDevice {
         // Spawn a task to remove the event from recent translated
         let tx = self.tx.clone();
         tokio::task::spawn(async move {
-            tokio::time::sleep(sleep_time).await;
+            tokio::time::sleep(MIN_EVENT_TIME).await;
             if let Err(e) = tx.send(CompositeCommand::RemoveRecentEvent(cap)).await {
                 log::error!("Failed to send remove recent event command: {:?}", e);
             }
@@ -1595,33 +1622,45 @@ impl CompositeDevice {
 
         // Emit the translated events. If this translated event has been emitted
         // very recently, delay sending subsequent events of the same type.
-        let sleep_time = Duration::from_millis(4);
         for event in emit_queue {
-            // Check to see if the event is in recently translated.
-            // If it is, delay emission in-place so event ordering is preserved.
-            let cap = event.as_capability();
-            if self.translated_recent_events.contains(&cap) {
-                log::debug!("Event emitted too quickly. Delaying emission.");
-                tokio::time::sleep(sleep_time).await;
-            }
-
-            // Add the event to our list of recently device translated events
-            self.translated_recent_events.insert(cap.clone());
-
-            // Spawn a task to remove the event from recent translated
-            let tx = self.tx.clone();
-            tokio::task::spawn(async move {
-                tokio::time::sleep(sleep_time).await;
-                if let Err(e) = tx.send(CompositeCommand::RemoveRecentEvent(cap)).await {
-                    log::error!("Failed to send remove recent event command: {:?}", e);
-                }
-            });
+            Self::prepare_translated_event(
+                &mut self.translated_recent_events,
+                &self.tx,
+                event.as_capability(),
+            )
+            .await;
 
             log::trace!("Emitting event: {:?}", event);
             self.handle_event(event).await?;
         }
 
         Ok(())
+    }
+
+    /// Preserve ordering and an observable interval for both mapped transitions.
+    /// In particular, a queued re-press must not immediately follow a delayed
+    /// release: state-coalescing HID targets could otherwise miss the neutral state.
+    async fn prepare_translated_event(
+        recent_events: &mut HashSet<Capability>,
+        tx: &mpsc::Sender<CompositeCommand>,
+        cap: Capability,
+    ) {
+        if recent_events.contains(&cap) {
+            log::debug!("Event emitted too quickly. Delaying emission.");
+            tokio::time::sleep(MIN_EVENT_TIME).await;
+        }
+
+        recent_events.insert(cap.clone());
+
+        // Use the same command queue as input events, preserving the existing
+        // timeout ordering while an in-loop transition delay is in progress.
+        let tx = tx.clone();
+        tokio::task::spawn(async move {
+            tokio::time::sleep(MIN_EVENT_TIME).await;
+            if let Err(e) = tx.send(CompositeCommand::RemoveRecentEvent(cap)).await {
+                log::error!("Failed to send remove recent event command: {:?}", e);
+            }
+        });
     }
 
     /// Translates the given event into a Vec of events based on the currently loaded
@@ -1829,6 +1868,15 @@ impl CompositeDevice {
         // disconnected in the middle of an input.
         self.targets.schedule_clear_state();
 
+        // Notify the manager so it can free the config entry this source
+        // device was holding
+        if let Err(e) = self.manager.try_send(ManagerCommand::SourceDeviceStopped {
+            composite_path: self.dbus.path().to_string(),
+            device_id: id.clone(),
+        }) {
+            log::error!("Failed to send source device stopped command: {e:?}");
+        }
+
         log::debug!(
             "Current source device paths: {:?}",
             self.source_device_paths
@@ -1945,40 +1993,6 @@ impl CompositeDevice {
                 }
                 self.capabilities.insert(cap.clone());
             }
-            // If Gyroscope or Accelerometer capabilties exist, report that Gamepad::Accelerometer and
-            // Gamepad::Gyro exist so the tester works. This is because we're blanket converting
-            // them before sending to targets.
-            //TODO: Remove this one Gamepad::Gyro/Gamepad::Accel are removed.
-            if self
-                .capabilities
-                .iter()
-                .any(|cap| matches!(cap, Capability::Accelerometer(_)))
-            {
-                self.capabilities
-                    .retain(|cap| !matches!(cap, Capability::Accelerometer(_)));
-                if !self
-                    .capabilities
-                    .contains(&Capability::Gamepad(Gamepad::Accelerometer))
-                {
-                    self.capabilities
-                        .insert(Capability::Gamepad(Gamepad::Accelerometer));
-                }
-            }
-            if self
-                .capabilities
-                .iter()
-                .any(|cap| matches!(cap, Capability::Gyroscope(_)))
-            {
-                self.capabilities
-                    .retain(|cap| !matches!(cap, Capability::Gyroscope(_)));
-                if !self
-                    .capabilities
-                    .contains(&Capability::Gamepad(Gamepad::Gyro))
-                {
-                    self.capabilities.insert(Capability::Gamepad(Gamepad::Gyro));
-                }
-            }
-
             self.capabilities_by_source.insert(id.clone(), capabilities);
 
             // Get the output capabilities of the source device and keep track
@@ -2334,7 +2348,10 @@ impl CompositeDevice {
     }
 
     /// Returns a unique id that can be used to persistently identify the device
-    async fn get_persistent_id(&self) -> Option<String> {
+    async fn get_persistent_id(&mut self) -> String {
+        if let Some(id) = self.persistent_id.as_ref() {
+            return id.clone();
+        }
         // Find a source device with a valid persistent identifier
         let mut keys: Vec<&String> = self.source_device_persistent_ids.keys().collect();
         keys.sort();
@@ -2343,14 +2360,15 @@ impl CompositeDevice {
                 continue;
             };
             log::debug!("Using persistent id from {key}: {persist_id}");
-            return Some(persist_id.clone());
+            self.persistent_id = Some(persist_id.clone());
+            return persist_id.clone();
         }
         log::debug!(
             "No valid persistent id found: {:?}",
             self.source_device_persistent_ids
         );
 
-        None
+        self.dbus.path().to_string()
     }
 
     /// Takes the provided [HashMap] and sets a filter for all matching source device ID's and
@@ -2532,6 +2550,99 @@ mod gesture_mapping_tests {
                 let event = NativeEvent::new_translated(source.clone(), target.clone(), value);
                 assert_eq!(event.get_source_capability(), Some(source.clone()));
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod translated_timing_tests {
+    use super::*;
+    use tokio::time::{advance, Instant};
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_release_and_repress_each_keep_an_observable_interval() {
+        let cap = Capability::Gamepad(Gamepad::Button(GamepadButton::South));
+        let (tx, mut rx) = mpsc::channel(16);
+        let replay_tx = tx.clone();
+        let (first_emitted_tx, first_emitted_rx) = tokio::sync::oneshot::channel();
+        let started = Instant::now();
+        let replay = tokio::spawn(async move {
+            let mut recent = HashSet::new();
+            let mut first_emitted_tx = Some(first_emitted_tx);
+            let mut emitted = Vec::new();
+            let mut command_order = Vec::new();
+            // Replay post-mapping events through the actual production timing
+            // helper and its timeout commands, all using one FIFO command queue.
+            while let Some(command) = rx.recv().await {
+                match command {
+                    CompositeCommand::HandleEvent(event) => {
+                        CompositeDevice::prepare_translated_event(
+                            &mut recent,
+                            &replay_tx,
+                            event.as_capability(),
+                        )
+                        .await;
+                        command_order.push(Some(event.pressed()));
+                        emitted.push((event.pressed(), Instant::now() - started));
+                        if let Some(tx) = first_emitted_tx.take() {
+                            tx.send(()).unwrap();
+                        }
+                    }
+                    CompositeCommand::RemoveRecentEvent(cap) => {
+                        recent.remove(&cap);
+                        command_order.push(None);
+                        if emitted.len() == 3 {
+                            break;
+                        }
+                    }
+                    _ => panic!("unexpected replay command"),
+                }
+            }
+            (emitted, command_order)
+        });
+
+        // DOWN at 0ms, UP at 1ms, DOWN at 2ms. The re-press is enqueued
+        // while the release sleeps, before the first 16ms removal is due.
+        tx.send(CompositeCommand::HandleEvent(NativeEvent::new(
+            cap.clone(),
+            InputValue::Bool(true),
+        )))
+        .await
+        .unwrap();
+        first_emitted_rx.await.unwrap();
+        advance(Duration::from_millis(1)).await;
+        tx.send(CompositeCommand::HandleEvent(NativeEvent::new(
+            cap.clone(),
+            InputValue::Bool(false),
+        )))
+        .await
+        .unwrap();
+        tokio::task::yield_now().await;
+        advance(Duration::from_millis(1)).await;
+        tx.send(CompositeCommand::HandleEvent(NativeEvent::new(
+            cap,
+            InputValue::Bool(true),
+        )))
+        .await
+        .unwrap();
+
+        let (emitted, command_order) = replay.await.unwrap();
+        assert_eq!(
+            command_order,
+            vec![Some(true), Some(false), Some(true), None]
+        );
+        assert_eq!(
+            emitted
+                .iter()
+                .map(|(pressed, _)| *pressed)
+                .collect::<Vec<_>>(),
+            vec![true, false, true]
+        );
+        assert_eq!(emitted[0].1, Duration::ZERO);
+        assert_eq!(emitted[1].1, Duration::from_millis(17));
+        assert_eq!(emitted[2].1, Duration::from_millis(33));
+        for pair in emitted.windows(2) {
+            assert!(pair[1].1 - pair[0].1 >= MIN_EVENT_TIME);
         }
     }
 }

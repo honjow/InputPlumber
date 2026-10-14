@@ -14,5 +14,3 @@ mapping:
     target_event:
       gamepad:
         button: QuickAccess
-
-
