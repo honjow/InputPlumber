@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     error::Error,
     fmt, fs,
-    io::{self, Read},
+    io::{self, Read, Write},
     os::{
         fd::{AsRawFd, RawFd},
         unix::fs::OpenOptionsExt,
@@ -330,6 +330,11 @@ pub fn discover_group(
         let offset = read_trim(&base.join(format!("{id}_offset")))
             .ok()
             .and_then(|s| s.parse().ok())
+            .or_else(|| {
+                read_trim(&base.join(format!("in_{prefix}_offset")))
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+            })
             .unwrap_or(0);
 
         let scale = read_trim(&base.join(format!("{id}_scale")))
@@ -614,6 +619,25 @@ fn write_str_verified(path: &Path, value: &str) -> Result<(), Box<dyn Error + Se
     Ok(())
 }
 
+/// An empty Rust write_all does not issue write(2), so sysfs never calls
+/// current_trigger_store. A newline is a nonempty write representing no trigger.
+fn write_trigger_unbind(writer: &mut impl Write) -> io::Result<()> {
+    writer.write_all(b"\n")
+}
+
+fn unbind_trigger(base: &Path) -> io::Result<()> {
+    let path = base.join("trigger/current_trigger");
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&path)?;
+    write_trigger_unbind(&mut file)?;
+    if !read_trim(&path)?.is_empty() {
+        return Err(io::Error::other("IIO trigger unbind did not take effect"));
+    }
+    Ok(())
+}
+
 const HRTIMER_TRIGGER_ROOT: &str = "/sys/kernel/config/iio/triggers/hrtimer";
 
 /// How to obtain the trigger bound to a buffer during setup.
@@ -625,9 +649,9 @@ pub enum TriggerStrategy {
     Hrtimer(String),
 }
 
-/// Unbinds and removes a dedicated hrtimer trigger when the owning
-/// driver is dropped, so it doesn't accumulate in configfs across
-/// restarts or unplug/replug cycles.
+/// On drop, removes a dedicated hrtimer only after buffer disable and
+/// unbinding are verified. If cleanup fails (including missing sysfs after
+/// unplug), retain the directory rather than remove a possibly bound trigger.
 #[derive(Debug)]
 pub struct HrtimerTriggerGuard {
     base: PathBuf,
@@ -641,8 +665,20 @@ impl Drop for HrtimerTriggerGuard {
         } else {
             self.base.join("buffer")
         };
-        let _ = fs::write(buffer_dir.join("enable"), "0");
-        let _ = fs::write(self.base.join("trigger/current_trigger"), "");
+        if let Err(error) = write_bool_verified(&buffer_dir.join("enable"), false) {
+            log::warn!(
+                "Cannot disable IIO buffer; retaining hrtimer {}: {error}",
+                self.trigger_dir.display()
+            );
+            return;
+        }
+        if let Err(error) = unbind_trigger(&self.base) {
+            log::warn!(
+                "Cannot unbind IIO trigger; retaining hrtimer {}: {error}",
+                self.trigger_dir.display()
+            );
+            return;
+        }
         if let Err(e) = fs::remove_dir(&self.trigger_dir) {
             log::warn!(
                 "Failed to remove hrtimer trigger {}: {e}",
@@ -893,7 +929,7 @@ fn warm_reset(base: &Path, buffer_dir: &Path) {
         thread::sleep(Duration::from_millis(100));
         let _ = fs::write(buffer_dir.join("enable"), "0");
     }
-    let _ = fs::write(base.join("trigger/current_trigger"), "");
+    let _ = unbind_trigger(base);
     thread::sleep(Duration::from_millis(50));
 }
 
@@ -924,7 +960,7 @@ fn disable_scan_elements(base: &Path) {
 
 fn disable_buffer(base: &Path, buffer_dir: &Path) {
     let _ = fs::write(buffer_dir.join("enable"), "0");
-    let _ = fs::write(base.join("trigger/current_trigger"), "");
+    let _ = unbind_trigger(base);
     disable_scan_elements(base);
 }
 
@@ -1212,6 +1248,10 @@ mod tests {
             "0"
         );
         assert_eq!(
+            fs::read(dir.path().join("trigger/current_trigger")).unwrap(),
+            b"\n"
+        );
+        assert_eq!(
             read_trim(&dir.path().join("trigger/current_trigger")).unwrap(),
             ""
         );
@@ -1299,6 +1339,10 @@ mod tests {
         assert!(!configfs.join("inputplumber-test").exists());
         assert_eq!(read_trim(&base.join("buffer/enable")).unwrap(), "0");
         assert_eq!(
+            fs::read(base.join("trigger/current_trigger")).unwrap(),
+            b"\n"
+        );
+        assert_eq!(
             read_trim(&base.join("trigger/current_trigger")).unwrap(),
             ""
         );
@@ -1324,5 +1368,92 @@ mod tests {
         );
         fs::remove_dir_all(dir.path().join("devices/trigger0")).unwrap();
         assert!(bind_trigger_with_fallback(&base, &strategy, 100.0, &unavailable).is_err());
+    }
+    #[test]
+    fn trigger_unbind_issues_nonempty_write_and_verifies_empty_readback() {
+        #[derive(Default)]
+        struct StoreSpy {
+            calls: usize,
+            bytes: Vec<u8>,
+        }
+        impl Write for StoreSpy {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.calls += 1;
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        // Unlike a regular-file-only test, this fails if write_all receives an
+        // empty slice: Write::write (the sysfs store equivalent) is never called.
+        let mut store = StoreSpy::default();
+        write_trigger_unbind(&mut store).unwrap();
+        assert_eq!(store.calls, 1);
+        assert_eq!(store.bytes, b"\n");
+
+        let dir = TestDir::new();
+        dir.write("trigger/current_trigger", "old-trigger");
+        unbind_trigger(dir.path()).unwrap();
+        assert_eq!(
+            fs::read(dir.path().join("trigger/current_trigger")).unwrap(),
+            b"\n"
+        );
+        assert_eq!(
+            read_trim(&dir.path().join("trigger/current_trigger")).unwrap(),
+            ""
+        );
+    }
+    #[test]
+    fn hrtimer_cleanup_failure_retains_the_trigger_directory() {
+        for fail_disable in [true, false] {
+            let dir = TestDir::new();
+            let base = dir.path().join("device");
+            let trigger_dir = dir.path().join("owned-trigger");
+            fs::create_dir(&trigger_dir).unwrap();
+            if fail_disable {
+                fs::create_dir_all(base.join("buffer/enable")).unwrap();
+                dir.write("device/trigger/current_trigger", "owned-trigger");
+            } else {
+                dir.write("device/buffer/enable", "1");
+                fs::create_dir_all(base.join("trigger/current_trigger")).unwrap();
+            }
+            drop(HrtimerTriggerGuard {
+                base: base.clone(),
+                trigger_dir: trigger_dir.clone(),
+            });
+            assert!(
+                trigger_dir.is_dir(),
+                "must not remove a possibly still-bound trigger"
+            );
+            if fail_disable {
+                assert_eq!(
+                    read_trim(&base.join("trigger/current_trigger")).unwrap(),
+                    "owned-trigger"
+                );
+            } else {
+                assert_eq!(read_trim(&base.join("buffer/enable")).unwrap(), "0");
+            }
+        }
+    }
+
+    #[test]
+    fn buffered_channels_use_shared_offset_and_keep_per_axis_precedence() {
+        let dir = TestDir::new();
+        dir.write("scan_elements/in_accel_x_index", "0");
+        dir.write("scan_elements/in_accel_x_type", "le:s16/16>>0");
+        dir.write("in_accel_offset", "2");
+        dir.write("in_accel_scale", "0.5");
+        let sample = |base: &Path| {
+            let channels = discover_group(base, "accel").unwrap();
+            let layout = compute_layout(channels, vec![], None);
+            let scale = group_scale(&layout.accel, "accel");
+            let data = decode_group(&layout.accel, scale, &10i16.to_le_bytes());
+            data.roll * data.scale
+        };
+        assert_eq!(sample(dir.path()), 6.0);
+        dir.write("in_accel_x_offset", "-4");
+        assert_eq!(sample(dir.path()), 3.0);
     }
 }
