@@ -1,8 +1,8 @@
 // 8BitDo Ultimate 2 Wireless DInput HID report structures.
 // Layouts derived from SDL_hidapi_8bitdo.c.
 //
-// Input report (0x04), 34 bytes:
-//   [0]     report_id       (always 0x04)
+// Input report (0x01), 34 bytes:
+//   [0]     report_id       (always 0x01)
 //   [1]     dpad            (0-7 = direction, other = centered)
 //   [2]     joystick_l_x    (0x00-0xFF, center 0x7F)
 //   [3]     joystick_l_y
@@ -67,21 +67,23 @@ pub enum DPadDirection {
     Left = 6,
     UpLeft = 7,
     #[default]
-    None = 15,
+    None = 8,
+    // Physical controller captures use 0x0f for the centered hat.
+    LegacyNone = 15,
 }
 
 impl DPadDirection {
     pub fn as_bitflag(&self) -> u8 {
         match *self {
-            Self::Up => 0x01,        // 00000001
-            Self::UpRight => 0x03,   // 00000011
-            Self::Right => 0x02,     // 00000010
-            Self::DownRight => 0x06, // 00000110
-            Self::Down => 0x04,      // 00000100
-            Self::DownLeft => 0x0c,  // 00001100
-            Self::Left => 0x08,      // 00001000
-            Self::UpLeft => 0x09,    // 00001001
-            Self::None => 0x00,      // 00000000
+            Self::Up => 0x01,                      // 00000001
+            Self::UpRight => 0x03,                 // 00000011
+            Self::Right => 0x02,                   // 00000010
+            Self::DownRight => 0x06,               // 00000110
+            Self::Down => 0x04,                    // 00000100
+            Self::DownLeft => 0x0c,                // 00001100
+            Self::Left => 0x08,                    // 00001000
+            Self::UpLeft => 0x09,                  // 00001001
+            Self::None | Self::LegacyNone => 0x00, // 00000000
         }
     }
 
@@ -234,7 +236,7 @@ impl PackedInputDataReport {}
 impl Default for PackedInputDataReport {
     fn default() -> Self {
         Self {
-            report_id: super::REPORT_ID_INPUT,
+            report_id: super::REPORT_ID_TARGET_INPUT,
             dpad_state: Default::default(),
             joystick_l_x: 0x7f,
             joystick_l_y: 0x7f,
@@ -274,5 +276,118 @@ impl PackedInputDataReport {
         let current = self.dpad_state;
         let updated = current.change(direction, pressed);
         self.dpad_state = updated;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::drivers::ultimate_2::{
+        report_descriptor::REPORT_DESCRIPTOR, REPORT_ID_INPUT, REPORT_ID_TARGET_INPUT,
+    };
+
+    #[test]
+    fn physical_source_capture_keeps_report_id_and_neutral() {
+        // Existing physical-device left-thumb capture from this module.
+        let raw = [
+            0x01, 0x0f, 0x7f, 0x7f, 0x7f, 0x7f, 0, 0, 0, 0x20, 0, 0, 0, 0, 0x2f, 0x2f, 0x0f, 0x9d,
+            0xff, 0xa9, 0xfb, 2, 0, 0x1d, 0, 0xfa, 0xff, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        assert_eq!(raw[0], REPORT_ID_INPUT);
+        let decoded = PackedInputDataReport::unpack(&raw).unwrap();
+        assert_eq!(decoded.dpad_state, DPadDirection::LegacyNone);
+        assert_eq!(decoded.dpad_state.as_bitflag(), 0);
+        assert!(decoded.button_l2);
+        assert_eq!(decoded.pack().unwrap(), raw);
+    }
+
+    #[test]
+    fn target_default_matches_descriptor_report_and_center() {
+        let raw = PackedInputDataReport::default().pack().unwrap();
+        assert_eq!(raw.len(), 34);
+        assert_eq!(&raw[..8], &[0x01, 8, 127, 127, 127, 127, 0, 0]);
+        assert_eq!(raw[0], REPORT_ID_TARGET_INPUT);
+        assert!(REPORT_DESCRIPTOR
+            .windows(2)
+            .any(|item| item == [0x85, raw[0]]));
+        assert_eq!(REPORT_ID_INPUT, REPORT_ID_TARGET_INPUT);
+    }
+
+    #[test]
+    fn dpad_cardinal_diagonal_release_round_trip() {
+        let mut state = PackedInputDataReport::default();
+        for direction in [
+            DPadDirection::Up,
+            DPadDirection::Right,
+            DPadDirection::Down,
+            DPadDirection::Left,
+        ] {
+            state.set_dpad(direction, true);
+            assert_eq!(state.dpad_state, direction);
+            state.set_dpad(direction, false);
+            assert_eq!(state.dpad_state, DPadDirection::None);
+        }
+        state.set_dpad(DPadDirection::Up, true);
+        state.set_dpad(DPadDirection::Right, true);
+        assert_eq!(state.dpad_state, DPadDirection::UpRight);
+        state.set_dpad(DPadDirection::Up, false);
+        assert_eq!(state.dpad_state, DPadDirection::Right);
+        state.set_dpad(DPadDirection::Right, false);
+        assert_eq!(state.dpad_state, DPadDirection::None);
+    }
+
+    #[test]
+    fn descriptor_uses_real_gamepad_usages_and_packed_report_lengths() {
+        // Decode the short HID items instead of merely searching for report-ID bytes.
+        // This catches a return to the old all-vendor input blob or a size mismatch.
+        let mut size = 0usize;
+        let mut count = 0usize;
+        let mut report_id = 0u8;
+        let mut page = 0u32;
+        let mut input_bits = std::collections::BTreeMap::new();
+        let mut output_bits = std::collections::BTreeMap::new();
+        let mut input_pages = std::collections::BTreeSet::new();
+        let mut offset = 0;
+        while offset < REPORT_DESCRIPTOR.len() {
+            let prefix = REPORT_DESCRIPTOR[offset];
+            assert_ne!(prefix, 0xfe, "unexpected long HID item");
+            let length = match prefix & 3 {
+                3 => 4,
+                n => n as usize,
+            };
+            let data = &REPORT_DESCRIPTOR[offset + 1..offset + 1 + length];
+            let value = data
+                .iter()
+                .enumerate()
+                .fold(0u32, |value, (i, byte)| value | ((*byte as u32) << (8 * i)));
+            match prefix & 0xfc {
+                0x04 => page = value,
+                0x74 => size = value as usize,
+                0x84 => report_id = value as u8,
+                0x94 => count = value as usize,
+                0x80 => {
+                    *input_bits.entry(report_id).or_insert(0usize) += size * count;
+                    input_pages.insert(page);
+                }
+                0x90 => *output_bits.entry(report_id).or_insert(0usize) += size * count,
+                _ => (),
+            }
+            offset += length + 1;
+        }
+        assert_eq!(
+            input_bits.into_iter().collect::<Vec<_>>(),
+            vec![(REPORT_ID_TARGET_INPUT, 33 * 8)]
+        );
+        assert_eq!(
+            output_bits.into_iter().collect::<Vec<_>>(),
+            vec![(crate::drivers::ultimate_2::REPORT_ID_RUMBLE, 4 * 8)]
+        );
+        for page in [0x01, 0x02, 0x09] {
+            assert!(
+                input_pages.contains(&page),
+                "missing standard input usage page {page:#x}"
+            );
+        }
+        assert_eq!(PackedRumbleOutputReport::default().pack().unwrap().len(), 5);
     }
 }

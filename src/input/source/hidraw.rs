@@ -3,16 +3,17 @@ pub mod blocked;
 pub mod dualsense;
 pub mod flydigi_vader_4_pro;
 pub mod fts3528;
+pub mod generic_buttons;
 pub mod gpd_macro_keyboard;
 pub mod gpd_touchpad_2023;
 pub mod gpd_touchpad_2024;
 pub mod horipad_steam;
 pub mod legion_go;
 pub mod legion_go2;
-pub mod legion_go_tp;
 pub mod legion_go_s_imu;
 pub mod legion_go_s_touchpad;
 pub mod legion_go_s_xinput;
+pub mod legion_go_tp;
 pub mod msi_claw;
 pub mod opineo_touchpad;
 pub mod oxp_hid;
@@ -25,7 +26,10 @@ pub mod zotac_zone;
 use std::{error::Error, time::Duration};
 
 use crate::{
-    config,
+    config::{
+        self,
+        capability_map::{load_capability_mappings, CapabilityMapConfig, CapabilityMapConfigV2},
+    },
     constants::BUS_SOURCES_PREFIX,
     drivers::{self},
     input::{
@@ -39,17 +43,18 @@ use crate::{
 use self::{
     ayaneo_haptics::AyaneoHaptics, blocked::BlockedHidrawDevice, dualsense::DualSenseController,
     flydigi_vader_4_pro::Vader4Pro, fts3528::Fts3528Touchscreen,
-    gpd_macro_keyboard::GpdMacroKeyboard, gpd_touchpad_2023::GpdTouchpad2023,
-    gpd_touchpad_2024::GpdTouchpad2024, horipad_steam::HoripadSteam, legion_go::LegionGoController,
-    legion_go2::LegionGo2Controller, legion_go_s_imu::LegionGoSImuController,
-    legion_go_s_touchpad::LegionGoSTouchpadController, legion_go_s_xinput::LegionGoSXInputController,
-    msi_claw::MsiClawController, opineo_touchpad::OrangePiNeoTouchpad, oxp_hid::OxpHid,
-    rog_ally::RogAlly, steam_deck::DeckController, ultimate_2::Ultimate2, xpad_uhid::XpadUhid,
-    zotac_zone::ZotacZone,
+    generic_buttons::GenericHidrawButtons, gpd_macro_keyboard::GpdMacroKeyboard,
+    gpd_touchpad_2023::GpdTouchpad2023, gpd_touchpad_2024::GpdTouchpad2024,
+    horipad_steam::HoripadSteam, legion_go::LegionGoController, legion_go2::LegionGo2Controller,
+    legion_go_s_imu::LegionGoSImuController, legion_go_s_touchpad::LegionGoSTouchpadController,
+    legion_go_s_xinput::LegionGoSXInputController, msi_claw::MsiClawController,
+    opineo_touchpad::OrangePiNeoTouchpad, oxp_hid::OxpHid, rog_ally::RogAlly,
+    steam_deck::DeckController, ultimate_2::Ultimate2, xpad_uhid::XpadUhid, zotac_zone::ZotacZone,
 };
 use super::{InputError, OutputError, SourceDeviceCompatible, SourceDriver, SourceDriverOptions};
 
 /// List of available drivers
+#[derive(Debug, PartialEq)]
 enum DriverType {
     AyaneoHaptics,
     Blocked,
@@ -84,6 +89,7 @@ pub enum HidRawDevice {
     Blocked(SourceDriver<BlockedHidrawDevice>),
     DualSense(SourceDriver<DualSenseController>),
     Fts3528Touchscreen(SourceDriver<Fts3528Touchscreen>),
+    GenericButtons(SourceDriver<GenericHidrawButtons>),
     GpdMacroKeyboard(SourceDriver<GpdMacroKeyboard>),
     GpdTouchpad2023(SourceDriver<GpdTouchpad2023>),
     GpdTouchpad2024(SourceDriver<GpdTouchpad2024>),
@@ -112,6 +118,7 @@ impl SourceDeviceCompatible for HidRawDevice {
             HidRawDevice::Blocked(source_driver) => source_driver.info_ref(),
             HidRawDevice::DualSense(source_driver) => source_driver.info_ref(),
             HidRawDevice::Fts3528Touchscreen(source_driver) => source_driver.info_ref(),
+            HidRawDevice::GenericButtons(source_driver) => source_driver.info_ref(),
             HidRawDevice::GpdMacroKeyboard(source_driver) => source_driver.info_ref(),
             HidRawDevice::GpdTouchpad2023(source_driver) => source_driver.info_ref(),
             HidRawDevice::GpdTouchpad2024(source_driver) => source_driver.info_ref(),
@@ -140,6 +147,7 @@ impl SourceDeviceCompatible for HidRawDevice {
             HidRawDevice::Blocked(source_driver) => source_driver.get_id(),
             HidRawDevice::DualSense(source_driver) => source_driver.get_id(),
             HidRawDevice::Fts3528Touchscreen(source_driver) => source_driver.get_id(),
+            HidRawDevice::GenericButtons(source_driver) => source_driver.get_id(),
             HidRawDevice::GpdMacroKeyboard(source_driver) => source_driver.get_id(),
             HidRawDevice::GpdTouchpad2023(source_driver) => source_driver.get_id(),
             HidRawDevice::GpdTouchpad2024(source_driver) => source_driver.get_id(),
@@ -168,6 +176,7 @@ impl SourceDeviceCompatible for HidRawDevice {
             HidRawDevice::Blocked(source_driver) => source_driver.client(),
             HidRawDevice::DualSense(source_driver) => source_driver.client(),
             HidRawDevice::Fts3528Touchscreen(source_driver) => source_driver.client(),
+            HidRawDevice::GenericButtons(source_driver) => source_driver.client(),
             HidRawDevice::GpdMacroKeyboard(source_driver) => source_driver.client(),
             HidRawDevice::GpdTouchpad2023(source_driver) => source_driver.client(),
             HidRawDevice::GpdTouchpad2024(source_driver) => source_driver.client(),
@@ -196,6 +205,7 @@ impl SourceDeviceCompatible for HidRawDevice {
             HidRawDevice::Blocked(source_driver) => source_driver.run().await,
             HidRawDevice::DualSense(source_driver) => source_driver.run().await,
             HidRawDevice::Fts3528Touchscreen(source_driver) => source_driver.run().await,
+            HidRawDevice::GenericButtons(source_driver) => source_driver.run().await,
             HidRawDevice::GpdMacroKeyboard(source_driver) => source_driver.run().await,
             HidRawDevice::GpdTouchpad2023(source_driver) => source_driver.run().await,
             HidRawDevice::GpdTouchpad2024(source_driver) => source_driver.run().await,
@@ -224,6 +234,7 @@ impl SourceDeviceCompatible for HidRawDevice {
             HidRawDevice::Blocked(source_driver) => source_driver.get_capabilities(),
             HidRawDevice::DualSense(source_driver) => source_driver.get_capabilities(),
             HidRawDevice::Fts3528Touchscreen(source_driver) => source_driver.get_capabilities(),
+            HidRawDevice::GenericButtons(source_driver) => source_driver.get_capabilities(),
             HidRawDevice::GpdMacroKeyboard(source_driver) => source_driver.get_capabilities(),
             HidRawDevice::GpdTouchpad2023(source_driver) => source_driver.get_capabilities(),
             HidRawDevice::GpdTouchpad2024(source_driver) => source_driver.get_capabilities(),
@@ -254,6 +265,7 @@ impl SourceDeviceCompatible for HidRawDevice {
             HidRawDevice::Fts3528Touchscreen(source_driver) => {
                 source_driver.get_output_capabilities()
             }
+            HidRawDevice::GenericButtons(source_driver) => source_driver.get_output_capabilities(),
             HidRawDevice::GpdMacroKeyboard(source_driver) => {
                 source_driver.get_output_capabilities()
             }
@@ -290,6 +302,7 @@ impl SourceDeviceCompatible for HidRawDevice {
             HidRawDevice::Blocked(source_driver) => source_driver.get_device_path(),
             HidRawDevice::DualSense(source_driver) => source_driver.get_device_path(),
             HidRawDevice::Fts3528Touchscreen(source_driver) => source_driver.get_device_path(),
+            HidRawDevice::GenericButtons(source_driver) => source_driver.get_device_path(),
             HidRawDevice::GpdMacroKeyboard(source_driver) => source_driver.get_device_path(),
             HidRawDevice::GpdTouchpad2023(source_driver) => source_driver.get_device_path(),
             HidRawDevice::GpdTouchpad2024(source_driver) => source_driver.get_device_path(),
@@ -326,7 +339,20 @@ impl HidRawDevice {
         let driver_type = HidRawDevice::get_driver_type(&device_info, is_blocked);
 
         match driver_type {
-            DriverType::Unknown => Err("No driver for hidraw interface found".into()),
+            DriverType::Unknown => {
+                if let Some(cap_map) = Self::load_capability_map_v2(&conf) {
+                    let device = GenericHidrawButtons::new(device_info.clone(), cap_map)?;
+                    let source_device =
+                        SourceDriver::new(composite_device, device, device_info.into(), conf);
+                    return Ok(Self::GenericButtons(source_device));
+                }
+                let vid = device_info.id_vendor();
+                let pid = device_info.id_product();
+                Err(format!(
+                    "No driver for hidraw interface found. VID: {vid:#06x}, PID: {pid:#06x}"
+                )
+                .into())
+            }
             DriverType::AyaneoHaptics => {
                 let options = SourceDriverOptions {
                     poll_rate: Duration::from_millis(0),
@@ -667,15 +693,49 @@ impl HidRawDevice {
         }
     }
 
+    fn load_capability_map_v2(
+        conf: &Option<config::SourceDevice>,
+    ) -> Option<CapabilityMapConfigV2> {
+        let cap_map_id = conf.as_ref()?.capability_map_id.as_ref()?;
+        let mappings = load_capability_mappings();
+        match mappings.get(cap_map_id) {
+            Some(CapabilityMapConfig::V2(config)) => Some(config.clone()),
+            _ => {
+                log::warn!("Capability map '{cap_map_id}' not found or not V2");
+                None
+            }
+        }
+    }
+
     /// Return the driver type for the given vendor and product
     fn get_driver_type(device: &UdevDevice, is_blocked: bool) -> DriverType {
         log::debug!("Finding driver for interface: {:?}", device);
         if is_blocked {
             return DriverType::Blocked;
         }
-        let vid = device.id_vendor();
-        let pid = device.id_product();
-        let iid = device.interface_number();
+        Self::get_driver_type_for_interface(
+            device.id_vendor(),
+            device.id_product(),
+            device.interface_number(),
+            &device.name(),
+            &device.drivers(),
+            &device.syspath(),
+            is_blocked,
+        )
+    }
+
+    fn get_driver_type_for_interface(
+        vid: u16,
+        pid: u16,
+        iid: i32,
+        name: &str,
+        kernel_drivers: &[String],
+        syspath: &str,
+        is_blocked: bool,
+    ) -> DriverType {
+        if is_blocked {
+            return DriverType::Blocked;
+        }
 
         // AYANEO DirectInput controller haptics
         if vid == ayaneo_haptics::VID && pid == ayaneo_haptics::PID {
@@ -763,7 +823,7 @@ impl HidRawDevice {
         // VID/PID, so it must be positively identified by device name.
         if vid == drivers::opineo::VID
             && pid == drivers::opineo::PID
-            && (device.name().starts_with("OPI000") || device.name().starts_with("SYNA3602"))
+            && (name.starts_with("OPI000") || name.starts_with("SYNA3602"))
         {
             log::info!("Detected OrangePi NEO Touchpad");
 
@@ -783,13 +843,9 @@ impl HidRawDevice {
         }
 
         // XpadUhid
-        let drivers = device.drivers();
-        if drivers.contains(&"microsoft".to_string()) {
-            let syspath = device.syspath();
-            if syspath.contains("uhid") {
-                log::info!("Detected UHID XPAD");
-                return DriverType::XpadUhid;
-            }
+        if kernel_drivers.iter().any(|driver| driver == "microsoft") && syspath.contains("uhid") {
+            log::info!("Detected UHID XPAD");
+            return DriverType::XpadUhid;
         }
 
         // Horipad Steam Controller
@@ -833,9 +889,7 @@ impl HidRawDevice {
         // must be matched by device name instead. (E.g. "HTIX5288:00")
         if vid == drivers::gpd_device::TOUCHPAD_2024_VID
             && pid == drivers::gpd_device::TOUCHPAD_2024_PID
-            && device
-                .name()
-                .starts_with(drivers::gpd_device::TOUCHPAD_2024_DEVICE_NAME_PREFIX)
+            && name.starts_with(drivers::gpd_device::TOUCHPAD_2024_DEVICE_NAME_PREFIX)
         {
             log::info!("Detected GPD Win Mini Touchpad (2024)");
             return DriverType::GpdTouchpad2024;
@@ -854,8 +908,7 @@ impl HidRawDevice {
             return DriverType::Ultimate2;
         }
 
-        // Unknown
-        log::warn!("No driver for hidraw interface found. VID: {vid}, PID: {pid}");
+        log::debug!("No specialized hidraw driver for VID: {vid:#06x}, PID: {pid:#06x}");
         DriverType::Unknown
     }
 }
@@ -863,4 +916,67 @@ impl HidRawDevice {
 /// Returns the DBus path for a [HIDRawDevice] from a device path (E.g. /dev/hidraw0)
 pub fn get_dbus_path(device_name: String) -> String {
     format!("{BUS_SOURCES_PREFIX}/{device_name}")
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn gpd_and_generic_interfaces_remain_distinct() {
+        let driver = |vid, pid, iid, name, blocked| {
+            HidRawDevice::get_driver_type_for_interface(vid, pid, iid, name, &[], "", blocked)
+        };
+        assert_eq!(
+            driver(0x2f24, 0x0135, 1, "", false),
+            DriverType::GpdMacroKeyboard
+        );
+        assert_eq!(driver(0x2f24, 0x0135, 3, "", false), DriverType::Unknown);
+        assert_eq!(driver(0x2f24, 0x0137, 0, "", false), DriverType::Unknown);
+        assert_eq!(driver(0x2f24, 0x0137, 0, "", true), DriverType::Blocked);
+    }
+}
+
+#[cfg(test)]
+mod upstream_dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn shared_touchpad_ids_still_use_device_name() {
+        let driver = |name| {
+            HidRawDevice::get_driver_type_for_interface(
+                drivers::opineo::VID,
+                drivers::opineo::PID,
+                0,
+                name,
+                &[],
+                "",
+                false,
+            )
+        };
+        assert_eq!(driver("OPI0001"), DriverType::OrangePiNeoTouchpad);
+        assert_eq!(driver("SYNA3602"), DriverType::OrangePiNeoTouchpad);
+        assert_eq!(
+            driver(drivers::gpd_device::TOUCHPAD_2024_DEVICE_NAME_PREFIX),
+            DriverType::GpdTouchpad2024
+        );
+    }
+
+    #[test]
+    fn xpad_uhid_still_requires_kernel_driver_and_path() {
+        let drivers = vec!["microsoft".to_string()];
+        let driver = HidRawDevice::get_driver_type_for_interface;
+        assert_eq!(
+            driver(0, 0, 0, "", &drivers, "/sys/devices/virtual/uhid", false),
+            DriverType::XpadUhid
+        );
+        assert_eq!(
+            driver(0, 0, 0, "", &drivers, "/sys/devices/usb", false),
+            DriverType::Unknown
+        );
+        assert_eq!(
+            driver(0, 0, 0, "", &[], "/sys/devices/virtual/uhid", false),
+            DriverType::Unknown
+        );
+    }
 }

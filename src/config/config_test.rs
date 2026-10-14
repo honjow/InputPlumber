@@ -145,3 +145,25 @@ async fn check_autostart_rules() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
+
+#[test]
+fn required_keys_bitmap_word_order_and_bounds() {
+    use super::key_bitmap_has_bit;
+    let word_bits = usize::BITS as u16;
+    assert!(key_bitmap_has_bit("2 1\n", 0));
+    assert!(!key_bitmap_has_bit("2 1", 1));
+    assert!(key_bitmap_has_bit("2 1", word_bits + 1));
+    assert!(!key_bitmap_has_bit("2 1", word_bits));
+    assert!(!key_bitmap_has_bit("2 1", word_bits * 2));
+    assert!(!key_bitmap_has_bit("", 0));
+    assert!(!key_bitmap_has_bit("not-hex", 0));
+}
+
+#[test]
+fn required_keys_config_accepts_new_and_legacy_profiles() {
+    let config: super::Evdev =
+        serde_yaml::from_str("name: keyboard\nrequired_keys: [KeyG, KeyLeftMeta]").unwrap();
+    assert_eq!(config.required_keys.unwrap(), vec!["KeyG", "KeyLeftMeta"]);
+    let legacy: super::Evdev = serde_yaml::from_str("name: keyboard").unwrap();
+    assert!(legacy.required_keys.is_none());
+}
