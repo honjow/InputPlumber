@@ -584,7 +584,6 @@ impl CompositeDevice {
                                 log::error!("Failed to resume source device {id}: {e:?}");
                             }
                         }
-
                         if let Err(e) = sender.send(()).await {
                             log::error!("Failed to send resume response: {e:?}");
                         }

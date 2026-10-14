@@ -631,7 +631,7 @@ pub enum TriggerStrategy {
 #[derive(Debug)]
 pub struct HrtimerTriggerGuard {
     base: PathBuf,
-    name: String,
+    trigger_dir: PathBuf,
 }
 
 impl Drop for HrtimerTriggerGuard {
@@ -643,11 +643,10 @@ impl Drop for HrtimerTriggerGuard {
         };
         let _ = fs::write(buffer_dir.join("enable"), "0");
         let _ = fs::write(self.base.join("trigger/current_trigger"), "");
-        let trigger_dir = Path::new(HRTIMER_TRIGGER_ROOT).join(&self.name);
-        if let Err(e) = fs::remove_dir(&trigger_dir) {
+        if let Err(e) = fs::remove_dir(&self.trigger_dir) {
             log::warn!(
                 "Failed to remove hrtimer trigger {}: {e}",
-                trigger_dir.display()
+                self.trigger_dir.display()
             );
         }
     }
@@ -657,6 +656,7 @@ fn bind_trigger(
     base: &Path,
     strategy: &TriggerStrategy,
     rate: f64,
+    hrtimer_root: &Path,
 ) -> Result<Option<HrtimerTriggerGuard>, Box<dyn Error + Send + Sync>> {
     match strategy {
         TriggerStrategy::FindExisting => {
@@ -672,12 +672,12 @@ fn bind_trigger(
             Ok(None)
         }
         TriggerStrategy::Hrtimer(name) => {
-            if !Path::new(HRTIMER_TRIGGER_ROOT).is_dir() {
+            if !hrtimer_root.is_dir() {
                 return Err(
                     "hrtimer trigger support not available - is iio_trig_hrtimer loaded?".into(),
                 );
             }
-            let trigger_dir = Path::new(HRTIMER_TRIGGER_ROOT).join(name);
+            let trigger_dir = hrtimer_root.join(name);
             if !trigger_dir.is_dir() {
                 fs::create_dir(&trigger_dir).map_err(|e| {
                     format!(
@@ -690,12 +690,13 @@ fn bind_trigger(
             // Own cleanup before any following operation can fail.
             let guard = HrtimerTriggerGuard {
                 base: base.to_path_buf(),
-                name: name.clone(),
+                trigger_dir,
             };
 
             // The hrtimer trigger only latches sampling_frequency at
             // bind/enable time, so this must happen before it's bound.
-            match find_trigger_device(name) {
+            let devices_root = base.parent().ok_or("IIO device has no parent directory")?;
+            match find_trigger_device(name, devices_root) {
                 Some(trig_dev) => {
                     let path = trig_dev.join("sampling_frequency");
                     match fs::write(&path, rate.to_string()) {
@@ -720,14 +721,38 @@ fn bind_trigger(
     }
 }
 
+fn bind_trigger_with_fallback(
+    base: &Path,
+    strategy: &TriggerStrategy,
+    rate: f64,
+    hrtimer_root: &Path,
+) -> Result<Option<HrtimerTriggerGuard>, Box<dyn Error + Send + Sync>> {
+    match bind_trigger(base, strategy, rate, hrtimer_root) {
+        Ok(guard) => Ok(guard),
+        Err(error) if matches!(strategy, TriggerStrategy::Hrtimer(_)) => {
+            // A missing hrtimer module/configfs must not discard a functioning
+            // hardware trigger. If neither is usable, the caller uses sysfs.
+            log::warn!("Dedicated hrtimer unavailable: {error}; trying matched hardware trigger");
+            let Some(existing) = find_trigger_for(base)? else {
+                return Err(error);
+            };
+            write_str_verified(&base.join("trigger/current_trigger"), &existing)?;
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Finds the `/sys/bus/iio/devices/triggerN` entry matching `name` exactly.
 /// Doesn't gate on `trigger_now` since hrtimer triggers don't expose it.
-fn find_trigger_device(name: &str) -> Option<PathBuf> {
-    let devices_root = Path::new("/sys/bus/iio/devices");
+fn find_trigger_device(name: &str, devices_root: &Path) -> Option<PathBuf> {
     fs::read_dir(devices_root)
         .ok()?
         .filter_map(|e| e.ok())
         .find_map(|entry| {
+            if !entry.file_name().to_string_lossy().starts_with("trigger") {
+                return None;
+            }
             let path = entry.path();
             (read_trim(&path.join("name")).ok()? == name).then_some(path)
         })
@@ -953,23 +978,20 @@ pub fn configure_buffer(
         gyro_rate
     };
 
-    guard._trigger_guard = match bind_trigger(base, &trigger, effective_rate) {
-        Ok(guard) => guard,
-        Err(error) if matches!(trigger, TriggerStrategy::Hrtimer(_)) => {
-            // A missing hrtimer module/configfs must not discard a functioning
-            // hardware trigger. If neither is usable, the caller uses sysfs.
-            log::warn!("Dedicated hrtimer unavailable: {error}; trying matched hardware trigger");
-            let Some(existing) = find_trigger_for(base)? else {
-                return Err(error);
-            };
-            write_str_verified(&base.join("trigger/current_trigger"), &existing)?;
-            None
-        }
-        Err(error) => return Err(error),
-    };
+    guard._trigger_guard = bind_trigger_with_fallback(
+        base,
+        &trigger,
+        effective_rate,
+        Path::new(HRTIMER_TRIGGER_ROOT),
+    )?;
 
     // Remove stale enabled channels before computing the exact selected layout.
-    disable_scan_elements(base);
+    for entry in fs::read_dir(&scan_dir)? {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().ends_with("_en") {
+            write_bool_verified(&entry.path(), false)?;
+        }
+    }
     for chan in accel.iter().chain(gyro.iter()) {
         write_bool_verified(&scan_dir.join(format!("{}_en", chan.id)), true)
             .map_err(|e| format!("failed to enable scan element {}: {e}", chan.id))?;
@@ -1245,5 +1267,62 @@ mod tests {
                 200.0
             );
         }
+    }
+    #[test]
+    fn dedicated_hrtimer_binds_rate_and_cleans_up_without_real_configfs() {
+        let dir = TestDir::new();
+        dir.write("devices/iio:device0/buffer/enable", "1");
+        dir.write("devices/iio:device0/trigger/current_trigger", "old");
+        dir.write("devices/trigger0/name", "inputplumber-test");
+        dir.write("devices/trigger0/sampling_frequency", "10");
+        let configfs = dir.path().join("fake-configfs");
+        fs::create_dir(&configfs).unwrap();
+        let base = dir.path().join("devices/iio:device0");
+        let guard = bind_trigger_with_fallback(
+            &base,
+            &TriggerStrategy::Hrtimer("inputplumber-test".into()),
+            100.0,
+            &configfs,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            read_trim(&base.join("trigger/current_trigger")).unwrap(),
+            "inputplumber-test"
+        );
+        assert_eq!(
+            read_trim(&dir.path().join("devices/trigger0/sampling_frequency")).unwrap(),
+            "100"
+        );
+        assert!(configfs.join("inputplumber-test").is_dir());
+        drop(guard);
+        assert!(!configfs.join("inputplumber-test").exists());
+        assert_eq!(read_trim(&base.join("buffer/enable")).unwrap(), "0");
+        assert_eq!(
+            read_trim(&base.join("trigger/current_trigger")).unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn unavailable_hrtimer_uses_matching_hardware_or_returns_error() {
+        let dir = TestDir::new();
+        dir.write("devices/iio:device0/name", "bmi260");
+        dir.write("devices/iio:device0/trigger/current_trigger", "");
+        dir.write("devices/trigger0/name", "bmi260-dev0");
+        let base = dir.path().join("devices/iio:device0");
+        let unavailable = dir.path().join("no-configfs");
+        let strategy = TriggerStrategy::Hrtimer("inputplumber-test".into());
+        assert!(
+            bind_trigger_with_fallback(&base, &strategy, 100.0, &unavailable)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            read_trim(&base.join("trigger/current_trigger")).unwrap(),
+            "bmi260-dev0"
+        );
+        fs::remove_dir_all(dir.path().join("devices/trigger0")).unwrap();
+        assert!(bind_trigger_with_fallback(&base, &strategy, 100.0, &unavailable).is_err());
     }
 }

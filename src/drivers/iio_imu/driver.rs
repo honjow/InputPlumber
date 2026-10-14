@@ -27,7 +27,7 @@ const POLL_BACKOFF_SLEEP: Duration = Duration::from_secs(3);
 enum ReadMode {
     Buffer {
         source: Box<dyn RecordSource>,
-        layout: RecordLayout,
+        layout: Box<RecordLayout>,
         record: Vec<u8>,
         accel_scale: f64,
         gyro_scale: f64,
@@ -164,7 +164,7 @@ impl Driver {
         Ok((
             ReadMode::Buffer {
                 source: Box::new(source),
-                layout,
+                layout: Box::new(layout),
                 record,
                 accel_scale,
                 gyro_scale,

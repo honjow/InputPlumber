@@ -147,6 +147,7 @@ async fn check_autostart_rules() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+#[allow(deprecated)] // Verify backward compatibility intentionally.
 fn iio_buffer_options_and_msi_sfh_policy_are_preserved() {
     let default: super::IIO = serde_yaml::from_str("name: accel_3d").unwrap();
     assert_eq!(default.use_buffer, None);

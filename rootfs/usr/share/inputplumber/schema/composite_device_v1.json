@@ -431,7 +431,7 @@
           "type": "string"
         },
         "sample_rate": {
-          "description": "Desired IIO sampling rate in Hz.",
+          "description": "Deprecated: use config.imu.sample_rate for the desired sampling rate in Hz.",
           "type": "number"
         },
         "use_buffer": {

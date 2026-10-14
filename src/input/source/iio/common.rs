@@ -113,3 +113,112 @@ fn translate_event(
         },
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::drivers::iio_imu::event::{AxisData, Event};
+
+    #[test]
+    fn new_imu_settings_override_legacy_without_losing_sysfs_policy() {
+        let config: config::SourceDevice = serde_yaml::from_str(
+            r#"
+group: imu
+iio:
+  name: accel_3d
+  use_buffer: false
+  sample_rate: 50.0
+  mount_matrix:
+    x: [1, 0, 0]
+    y: [0, 1, 0]
+    z: [0, 0, 1]
+config:
+  imu:
+    sample_rate: 100.0
+    accel_correction: 10.0
+    gyro_correction: 100.0
+    mount_matrix:
+      x: [-1, 0, 0]
+      y: [0, 0, 1]
+      z: [0, 1, 0]
+"#,
+        )
+        .unwrap();
+        assert_eq!(sample_rate_from_config(Some(&config)), Some(100.0));
+        assert_eq!(use_buffer_from_config(Some(&config)), Some(false));
+        assert_eq!(corrections_from_config(Some(&config)), (10.0, 100.0));
+        let matrix = mount_matrix_from_config(Some(&config)).unwrap();
+        assert_eq!(matrix.x, (-1.0, 0.0, 0.0));
+        assert_eq!(matrix.y, (0.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn legacy_settings_and_default_corrections_remain_supported() {
+        let config: config::SourceDevice = serde_yaml::from_str(
+            r#"
+group: imu
+iio:
+  name: gyro_3d
+  sample_rate: 80.0
+  mount_matrix:
+    x: [-1, 0, 0]
+    y: [0, 1, 0]
+    z: [0, 0, 1]
+"#,
+        )
+        .unwrap();
+        assert_eq!(sample_rate_from_config(Some(&config)), Some(80.0));
+        assert_eq!(
+            mount_matrix_from_config(Some(&config)).unwrap().x,
+            (-1.0, 0.0, 0.0)
+        );
+        assert_eq!(corrections_from_config(Some(&config)), (1.0, 1.0));
+        assert_eq!(use_buffer_from_config(Some(&config)), None);
+    }
+
+    #[test]
+    fn raw_and_sysfs_events_apply_si_scale_and_correction_exactly_once() {
+        let events = translate_events(
+            vec![
+                Event::Accelerometer(AxisData {
+                    roll: 2.0,
+                    pitch: -4.0,
+                    yaw: 0.0,
+                    scale: 0.25,
+                }),
+                Event::Gyroscope(AxisData {
+                    roll: 0.5,
+                    pitch: -1.0,
+                    yaw: 0.0,
+                    scale: 1.0,
+                }),
+            ],
+            10.0,
+            100.0,
+        );
+        assert_eq!(
+            events[0].as_capability(),
+            Capability::Accelerometer(Source::Center)
+        );
+        assert_eq!(
+            events[1].as_capability(),
+            Capability::Gyroscope(Source::Center)
+        );
+        assert!(matches!(
+            events[0].get_value(),
+            InputValue::Vector3 {
+                x: Some(5.0),
+                y: Some(-10.0),
+                z: Some(0.0)
+            }
+        ));
+        assert!(matches!(
+            events[1].get_value(),
+            InputValue::Vector3 {
+                x: Some(50.0),
+                y: Some(-100.0),
+                z: Some(0.0)
+            }
+        ));
+    }
+}
