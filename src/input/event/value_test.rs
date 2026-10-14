@@ -62,3 +62,37 @@ fn touchscreen_gesture_button_translations_preserve_press_and_release() {
         }
     }
 }
+
+#[test]
+fn ordinary_touch_buttons_keep_translation_without_synthesizing_gestures() {
+    use crate::input::{capability::GestureType, event::value::TranslationError};
+    let config = CapabilityConfig::default();
+    for source in [
+        Capability::Touchpad(Touchpad::LeftPad(Touch::Button(TouchButton::Press))),
+        Capability::Touchpad(Touchpad::RightPad(Touch::Button(TouchButton::Press))),
+        Capability::Touchpad(Touchpad::CenterPad(Touch::Button(TouchButton::Press))),
+        Capability::Touchscreen(Touch::Button(TouchButton::Press)),
+    ] {
+        for touch in [
+            Touch::Button(TouchButton::Touch),
+            Touch::Gesture(GestureType::Up),
+        ] {
+            for target in [
+                Capability::Touchpad(Touchpad::LeftPad(touch.clone())),
+                Capability::Touchpad(Touchpad::RightPad(touch.clone())),
+                Capability::Touchpad(Touchpad::CenterPad(touch.clone())),
+                Capability::Touchscreen(touch.clone()),
+            ] {
+                for pressed in [true, false] {
+                    let result =
+                        InputValue::Bool(pressed).translate(&source, &config, &target, &config);
+                    if matches!(touch, Touch::Button(_)) {
+                        assert_eq!(result.unwrap().pressed(), pressed);
+                    } else {
+                        assert!(matches!(result, Err(TranslationError::NotImplemented)));
+                    }
+                }
+            }
+        }
+    }
+}
