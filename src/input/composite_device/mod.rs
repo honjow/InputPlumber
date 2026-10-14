@@ -111,7 +111,7 @@ pub struct CompositeDevice {
     /// List of currently "pressed" actions used to translate multiple input
     /// sequences into a single input event.
     translatable_active_inputs: Vec<Capability>,
-    /// List of translated events that were emitted less than 8ms ago. This
+    /// List of translated events within the minimum observable interval. This
     /// is required to support "on release" style buttons on some devices where
     /// a button "up" event will fire immediately after a "down" event upon
     /// physical release of the button.
@@ -1596,31 +1596,44 @@ impl CompositeDevice {
         // Emit the translated events. If this translated event has been emitted
         // very recently, delay sending subsequent events of the same type.
         for event in emit_queue {
-            // Check to see if the event is in recently translated.
-            // If it is, delay emission in-place so event ordering is preserved.
-            let cap = event.as_capability();
-            if self.translated_recent_events.contains(&cap) && !event.pressed() {
-                log::debug!("Event emitted too quickly. Delaying emission.");
-                tokio::time::sleep(MIN_EVENT_TIME).await;
-            }
-
-            // Add the event to our list of recently device translated events
-            self.translated_recent_events.insert(cap.clone());
-
-            // Spawn a task to remove the event from recent translated
-            let tx = self.tx.clone();
-            tokio::task::spawn(async move {
-                tokio::time::sleep(MIN_EVENT_TIME).await;
-                if let Err(e) = tx.send(CompositeCommand::RemoveRecentEvent(cap)).await {
-                    log::error!("Failed to send remove recent event command: {:?}", e);
-                }
-            });
+            Self::prepare_translated_event(
+                &mut self.translated_recent_events,
+                &self.tx,
+                event.as_capability(),
+            )
+            .await;
 
             log::trace!("Emitting event: {:?}", event);
             self.handle_event(event).await?;
         }
 
         Ok(())
+    }
+
+    /// Preserve ordering and an observable interval for both mapped transitions.
+    /// In particular, a queued re-press must not immediately follow a delayed
+    /// release: state-coalescing HID targets could otherwise miss the neutral state.
+    async fn prepare_translated_event(
+        recent_events: &mut HashSet<Capability>,
+        tx: &mpsc::Sender<CompositeCommand>,
+        cap: Capability,
+    ) {
+        if recent_events.contains(&cap) {
+            log::debug!("Event emitted too quickly. Delaying emission.");
+            tokio::time::sleep(MIN_EVENT_TIME).await;
+        }
+
+        recent_events.insert(cap.clone());
+
+        // Use the same command queue as input events, preserving the existing
+        // timeout ordering while an in-loop transition delay is in progress.
+        let tx = tx.clone();
+        tokio::task::spawn(async move {
+            tokio::time::sleep(MIN_EVENT_TIME).await;
+            if let Err(e) = tx.send(CompositeCommand::RemoveRecentEvent(cap)).await {
+                log::error!("Failed to send remove recent event command: {:?}", e);
+            }
+        });
     }
 
     /// Translates the given event into a Vec of events based on the currently loaded
@@ -2434,5 +2447,98 @@ mod stale_release_tests {
             &tf,
             &Capability::Keyboard(Keyboard::KeyDelete)
         ));
+    }
+}
+
+#[cfg(test)]
+mod translated_timing_tests {
+    use super::*;
+    use tokio::time::{advance, Instant};
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_release_and_repress_each_keep_an_observable_interval() {
+        let cap = Capability::Gamepad(Gamepad::Button(GamepadButton::South));
+        let (tx, mut rx) = mpsc::channel(16);
+        let replay_tx = tx.clone();
+        let (first_emitted_tx, first_emitted_rx) = tokio::sync::oneshot::channel();
+        let started = Instant::now();
+        let replay = tokio::spawn(async move {
+            let mut recent = HashSet::new();
+            let mut first_emitted_tx = Some(first_emitted_tx);
+            let mut emitted = Vec::new();
+            let mut command_order = Vec::new();
+            // Replay post-mapping events through the actual production timing
+            // helper and its timeout commands, all using one FIFO command queue.
+            while let Some(command) = rx.recv().await {
+                match command {
+                    CompositeCommand::HandleEvent(event) => {
+                        CompositeDevice::prepare_translated_event(
+                            &mut recent,
+                            &replay_tx,
+                            event.as_capability(),
+                        )
+                        .await;
+                        command_order.push(Some(event.pressed()));
+                        emitted.push((event.pressed(), Instant::now() - started));
+                        if let Some(tx) = first_emitted_tx.take() {
+                            tx.send(()).unwrap();
+                        }
+                    }
+                    CompositeCommand::RemoveRecentEvent(cap) => {
+                        recent.remove(&cap);
+                        command_order.push(None);
+                        if emitted.len() == 3 {
+                            break;
+                        }
+                    }
+                    _ => panic!("unexpected replay command"),
+                }
+            }
+            (emitted, command_order)
+        });
+
+        // DOWN at 0ms, UP at 1ms, DOWN at 2ms. The re-press is enqueued
+        // while the release sleeps, before the first 16ms removal is due.
+        tx.send(CompositeCommand::HandleEvent(NativeEvent::new(
+            cap.clone(),
+            InputValue::Bool(true),
+        )))
+        .await
+        .unwrap();
+        first_emitted_rx.await.unwrap();
+        advance(Duration::from_millis(1)).await;
+        tx.send(CompositeCommand::HandleEvent(NativeEvent::new(
+            cap.clone(),
+            InputValue::Bool(false),
+        )))
+        .await
+        .unwrap();
+        tokio::task::yield_now().await;
+        advance(Duration::from_millis(1)).await;
+        tx.send(CompositeCommand::HandleEvent(NativeEvent::new(
+            cap,
+            InputValue::Bool(true),
+        )))
+        .await
+        .unwrap();
+
+        let (emitted, command_order) = replay.await.unwrap();
+        assert_eq!(
+            command_order,
+            vec![Some(true), Some(false), Some(true), None]
+        );
+        assert_eq!(
+            emitted
+                .iter()
+                .map(|(pressed, _)| *pressed)
+                .collect::<Vec<_>>(),
+            vec![true, false, true]
+        );
+        assert_eq!(emitted[0].1, Duration::ZERO);
+        assert_eq!(emitted[1].1, Duration::from_millis(17));
+        assert_eq!(emitted[2].1, Duration::from_millis(33));
+        for pair in emitted.windows(2) {
+            assert!(pair[1].1 - pair[0].1 >= MIN_EVENT_TIME);
+        }
     }
 }
