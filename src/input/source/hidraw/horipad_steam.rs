@@ -234,9 +234,18 @@ fn translate_event(event: event::Event) -> NativeEvent {
             event::InertialEvent::Accelerometer(value) => NativeEvent::new(
                 Capability::Accelerometer(Source::Center),
                 InputValue::Vector3 {
-                    x: Some(normalize_accel_value_i16(value.x, HORIPAD_ACCEL_RAW_TO_MPS2)),
-                    y: Some(normalize_accel_value_i16(value.y, HORIPAD_ACCEL_RAW_TO_MPS2)),
-                    z: Some(normalize_accel_value_i16(value.z, HORIPAD_ACCEL_RAW_TO_MPS2)),
+                    x: Some(normalize_accel_value_i16(
+                        value.x,
+                        HORIPAD_ACCEL_RAW_TO_MPS2,
+                    )),
+                    y: Some(normalize_accel_value_i16(
+                        value.y,
+                        HORIPAD_ACCEL_RAW_TO_MPS2,
+                    )),
+                    z: Some(normalize_accel_value_i16(
+                        value.z,
+                        HORIPAD_ACCEL_RAW_TO_MPS2,
+                    )),
                 },
             ),
             event::InertialEvent::Gyroscope(value) => NativeEvent::new(

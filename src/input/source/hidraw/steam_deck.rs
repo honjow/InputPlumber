@@ -235,7 +235,9 @@ impl SourceOutputDevice for DeckController {
                 self.driver.write(&report)?;
             }
             OutputEvent::SteamDeckHapticPulse(packed_haptic_pulse_report) => {
-                let report = packed_haptic_pulse_report.pack().map_err(|e| e.to_string())?;
+                let report = packed_haptic_pulse_report
+                    .pack()
+                    .map_err(|e| e.to_string())?;
                 self.driver.write(&report)?;
             }
             OutputEvent::SteamDeckRumble(packed_rumble_report) => {

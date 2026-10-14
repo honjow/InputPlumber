@@ -1,16 +1,19 @@
-use std::{error::Error, ffi::CString, time::{Duration, Instant}};
+use std::{
+    error::Error,
+    ffi::CString,
+    time::{Duration, Instant},
+};
 
 use hidapi::HidDevice;
 use packed_struct::PackedStruct;
 
-use crate::{udev::device::UdevDevice};
+use crate::udev::device::UdevDevice;
 
 use super::{
     event::{BinaryInput, Event, TouchAxisEvent, TouchButtonEvent, TriggerEvent, TriggerInput},
     hid_report::TouchpadDataReport,
-    TOUCHPAD_2023_PAD_FORCE_NORMAL as PAD_FORCE_NORMAL,
-    TOUCHPAD_2023_TOUCH_DATA as TOUCH_DATA,
-    TOUCHPAD_2023_VID as VID, TOUCHPAD_2023_PID as PID,
+    TOUCHPAD_2023_PAD_FORCE_NORMAL as PAD_FORCE_NORMAL, TOUCHPAD_2023_PID as PID,
+    TOUCHPAD_2023_TOUCH_DATA as TOUCH_DATA, TOUCHPAD_2023_VID as VID,
 };
 
 const CLICK_DELAY: Duration = Duration::from_millis(150);
@@ -174,7 +177,7 @@ impl TouchpadDriver2023 {
                 self.first_touch_x,
                 self.first_touch_y,
                 state.touch_x0,
-                state.touch_y0
+                state.touch_y0,
             ) < MAX_TAP_DISTANCE_SQ
         {
             // Handle double click

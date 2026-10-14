@@ -218,7 +218,8 @@ impl SourceOutputDevice for Ultimate2 {
             OutputEvent::SteamDeckHaptics(report) => Ok(self.process_haptic_ff(report)?),
             OutputEvent::SteamDeckHapticPulse(report) => {
                 let (weak, strong) = report.magnitudes();
-                self.driver.rumble((strong / 256) as u8, (weak / 256) as u8)?;
+                self.driver
+                    .rumble((strong / 256) as u8, (weak / 256) as u8)?;
                 self.haptic_timeout = Some(Instant::now() + report.capped_duration());
                 Ok(())
             }
@@ -434,17 +435,35 @@ fn translate_event(event: event::Event) -> NativeEvent {
             event::InertialEvent::Accelerometer(value) => NativeEvent::new(
                 Capability::Accelerometer(Source::Center),
                 InputValue::Vector3 {
-                    x: Some(normalize_accel_value_i16(value.x, ULTIMATE_2_ACCEL_RAW_TO_MPS2)),
-                    y: Some(normalize_accel_value_i16(value.y, ULTIMATE_2_ACCEL_RAW_TO_MPS2)),
-                    z: Some(normalize_accel_value_i16(value.z, ULTIMATE_2_ACCEL_RAW_TO_MPS2)),
+                    x: Some(normalize_accel_value_i16(
+                        value.x,
+                        ULTIMATE_2_ACCEL_RAW_TO_MPS2,
+                    )),
+                    y: Some(normalize_accel_value_i16(
+                        value.y,
+                        ULTIMATE_2_ACCEL_RAW_TO_MPS2,
+                    )),
+                    z: Some(normalize_accel_value_i16(
+                        value.z,
+                        ULTIMATE_2_ACCEL_RAW_TO_MPS2,
+                    )),
                 },
             ),
             event::InertialEvent::Gyroscope(value) => NativeEvent::new(
                 Capability::Gyroscope(Source::Center),
                 InputValue::Vector3 {
-                    x: Some(normalize_gyro_value_i16(value.x, ULTIMATE_2_GYRO_RAW_TO_RAD_S)),
-                    y: Some(normalize_gyro_value_i16(value.y, ULTIMATE_2_GYRO_RAW_TO_RAD_S)),
-                    z: Some(normalize_gyro_value_i16(value.z, ULTIMATE_2_GYRO_RAW_TO_RAD_S)),
+                    x: Some(normalize_gyro_value_i16(
+                        value.x,
+                        ULTIMATE_2_GYRO_RAW_TO_RAD_S,
+                    )),
+                    y: Some(normalize_gyro_value_i16(
+                        value.y,
+                        ULTIMATE_2_GYRO_RAW_TO_RAD_S,
+                    )),
+                    z: Some(normalize_gyro_value_i16(
+                        value.z,
+                        ULTIMATE_2_GYRO_RAW_TO_RAD_S,
+                    )),
                 },
             ),
         },

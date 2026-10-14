@@ -2,9 +2,8 @@ use std::{error::Error, fmt::Debug};
 
 use crate::{
     drivers::gpd_device::{
-        event,
-        touchpad_driver_2024::TouchpadDriver2024,
-        TOUCHPAD_2024_PAD_FORCE_MAX, TOUCHPAD_2024_X_MAX, TOUCHPAD_2024_Y_MAX,
+        event, touchpad_driver_2024::TouchpadDriver2024, TOUCHPAD_2024_PAD_FORCE_MAX,
+        TOUCHPAD_2024_X_MAX, TOUCHPAD_2024_Y_MAX,
     },
     input::{
         capability::{Capability, Gamepad, GamepadTrigger, Touch, TouchButton, Touchpad},

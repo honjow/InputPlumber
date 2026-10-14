@@ -409,13 +409,11 @@ impl Driver {
                     z: -state.accel_y.to_primitive(),
                 },
             )));
-            events.push(Event::Inertia(InertialEvent::Gyroscope(
-                InertialInput {
-                    x: state.pitch.to_primitive(),
-                    y: state.roll.to_primitive(),
-                    z: -state.yaw.to_primitive(),
-                },
-            )));
+            events.push(Event::Inertia(InertialEvent::Gyroscope(InertialInput {
+                x: state.pitch.to_primitive(),
+                y: state.roll.to_primitive(),
+                z: -state.yaw.to_primitive(),
+            })));
         };
 
         events

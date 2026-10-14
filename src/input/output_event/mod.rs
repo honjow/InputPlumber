@@ -4,7 +4,9 @@ use ::evdev::{FFEffectData, InputEvent};
 
 use crate::drivers::{
     dualsense::hid_report::SetStatePackedOutputData,
-    steam_deck::hid_report::{PackedHapticPulseReport, PackedHapticReport, PackedRumbleReport, PadSide},
+    steam_deck::hid_report::{
+        PackedHapticPulseReport, PackedHapticReport, PackedRumbleReport, PadSide,
+    },
 };
 
 use super::output_capability::{Haptic, OutputCapability};

@@ -1,4 +1,8 @@
-use std::{error::Error, ffi::CString, time::{Duration, Instant}};
+use std::{
+    error::Error,
+    ffi::CString,
+    time::{Duration, Instant},
+};
 
 use hidapi::HidDevice;
 use packed_struct::PackedStruct;
@@ -8,8 +12,8 @@ use crate::udev::device::UdevDevice;
 use super::{
     event::{BinaryInput, Event, TouchAxisEvent, TouchButtonEvent, TriggerEvent, TriggerInput},
     hid_report::TouchpadDataReport2024,
-    TOUCHPAD_2024_PAD_FORCE_NORMAL as PAD_FORCE_NORMAL,
-    TOUCHPAD_2024_VID as VID, TOUCHPAD_2024_PID as PID,
+    TOUCHPAD_2024_PAD_FORCE_NORMAL as PAD_FORCE_NORMAL, TOUCHPAD_2024_PID as PID,
+    TOUCHPAD_2024_VID as VID,
 };
 
 // Report ID
@@ -146,7 +150,7 @@ impl TouchpadDriver2024 {
                 self.first_touch_x,
                 self.first_touch_y,
                 state.touch_x0,
-                state.touch_y0
+                state.touch_y0,
             ) < MAX_TAP_DISTANCE_SQ
         {
             // Handle double click
@@ -229,4 +233,3 @@ impl TouchpadDriver2024 {
         events
     }
 }
-

@@ -316,7 +316,10 @@ fn normalize_axis_value(event: AxisEvent) -> InputValue {
         AxisEvent::LeftAccel(value)
         | AxisEvent::RightAccel(value)
         | AxisEvent::MultiAccel(value) => InputValue::Vector3 {
-            x: Some(normalize_accel_value_i16(value.pitch, GO2_ACCEL_RAW_TO_MPS2)),
+            x: Some(normalize_accel_value_i16(
+                value.pitch,
+                GO2_ACCEL_RAW_TO_MPS2,
+            )),
             y: Some(normalize_accel_value_i16(value.roll, GO2_ACCEL_RAW_TO_MPS2)),
             z: Some(normalize_accel_value_i16(value.yaw, GO2_ACCEL_RAW_TO_MPS2)),
         },

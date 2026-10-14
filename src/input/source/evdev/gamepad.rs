@@ -429,7 +429,10 @@ impl GamepadEventDevice {
 
     // Process Steam Deck Haptic Pulse events. Real controller firmware times
     // this itself; we approximate it with the kernel's FF replay length.
-    fn process_haptic_pulse_ff(&mut self, report: PackedHapticPulseReport) -> Result<(), Box<dyn Error>> {
+    fn process_haptic_pulse_ff(
+        &mut self,
+        report: PackedHapticPulseReport,
+    ) -> Result<(), Box<dyn Error>> {
         if self.ff_effects_deck.is_none() {
             let effect_data = FFEffectData {
                 direction: 0,

@@ -202,7 +202,8 @@ impl SourceOutputDevice for DualSenseController {
             OutputEvent::SteamDeckHaptics(_report) => Ok(()),
             OutputEvent::SteamDeckHapticPulse(report) => {
                 let (weak, strong) = report.magnitudes();
-                self.driver.rumble((strong / 256) as u8, (weak / 256) as u8)?;
+                self.driver
+                    .rumble((strong / 256) as u8, (weak / 256) as u8)?;
                 self.haptic_timeout = Some(Instant::now() + report.capped_duration());
                 Ok(())
             }
