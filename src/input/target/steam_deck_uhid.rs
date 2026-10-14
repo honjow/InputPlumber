@@ -17,8 +17,8 @@ use crate::{
     config::CompositeDeviceConfig,
     drivers::steam_deck::{
         hid_report::{
-            PackedHapticPulseReport, PackedHapticReport, PackedInputDataReport, PackedRumbleReport, ReportType,
-            StringAttribute, PAD_FORCE_MAX, PAD_X_MAX, PAD_X_MIN, PAD_Y_MAX, PAD_Y_MIN,
+            PackedHapticPulseReport, PackedHapticReport, PackedInputDataReport, PackedRumbleReport,
+            ReportType, StringAttribute, PAD_FORCE_MAX, PAD_X_MAX, PAD_X_MIN, PAD_Y_MAX, PAD_Y_MIN,
             STICK_FORCE_MAX, STICK_X_MAX, STICK_X_MIN, STICK_Y_MAX, STICK_Y_MIN, TRIGG_MAX,
         },
         report_descriptor::CONTROLLER_DESCRIPTOR,
@@ -330,6 +330,7 @@ impl SteamDeckUhidDevice {
                         TouchButton::Touch => self.state.l_pad_touch = event.pressed(),
                         TouchButton::Press => self.state.l_pad_press = event.pressed(),
                     },
+                    Touch::Gesture(_) => (),
                 },
                 //TODO:: Remove CenterPad after we implement Target Profiles
                 Touchpad::RightPad(touch_event) | Touchpad::CenterPad(touch_event) => {
@@ -362,6 +363,7 @@ impl SteamDeckUhidDevice {
                             TouchButton::Touch => self.state.r_pad_touch = event.pressed(),
                             TouchButton::Press => self.state.r_pad_press = event.pressed(),
                         },
+                        Touch::Gesture(_) => (),
                     }
                 }
             },

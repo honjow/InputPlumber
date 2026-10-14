@@ -1393,6 +1393,13 @@
               "type": "null"
             }
           ]
+        },
+        "gesture": {
+          "description": "Edge-swipe gesture type",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },

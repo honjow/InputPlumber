@@ -247,6 +247,7 @@ impl InputValue {
                                 Touch::Motion => Err(TranslationError::NotImplemented),
                                 // Gamepad Button -> Touchscreen Button
                                 Touch::Button(_) => Err(TranslationError::NotImplemented),
+                                Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                             },
                             // Gamepad Button -> Gyroscope
                             Capability::Gyroscope(_) => Err(TranslationError::NotImplemented),
@@ -401,6 +402,7 @@ impl InputValue {
                         Capability::Touchscreen(touch) => match touch {
                             Touch::Motion => Err(TranslationError::NotImplemented),
                             Touch::Button(_) => Err(TranslationError::NotImplemented),
+                            Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                         },
                         Capability::Gyroscope(_) => Err(TranslationError::NotImplemented),
                         Capability::Accelerometer(_) => Err(TranslationError::NotImplemented),
@@ -480,18 +482,21 @@ impl InputValue {
                                 Touch::Motion => Ok(self.clone()),
                                 // Touchpad Motion -> Touchpad Button
                                 Touch::Button(_) => Err(TranslationError::NotImplemented),
+                                Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                             },
                             Touchpad::RightPad(target_touch) => match target_touch {
                                 // Touchpad Motion -> Touchpad Motion
                                 Touch::Motion => Ok(self.clone()),
                                 // Touchpad Motion -> Touchpad Button
                                 Touch::Button(_) => Err(TranslationError::NotImplemented),
+                                Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                             },
                             Touchpad::CenterPad(target_touch) => match target_touch {
                                 // Touchpad Motion -> Touchpad Motion
                                 Touch::Motion => Ok(self.clone()),
                                 // Touchspad Motion -> Touchpad Button
                                 Touch::Button(_) => Err(TranslationError::NotImplemented),
+                                Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                             },
                         },
                         // Touchpad Motion -> Touchscreen ...
@@ -500,6 +505,7 @@ impl InputValue {
                             Touch::Motion => Ok(self.clone()),
                             // Touchpad Motion -> Touchscreen Button
                             Touch::Button(_) => Err(TranslationError::NotImplemented),
+                            Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                         },
                         // Touchpad Motion -> Gyroscope...
                         Capability::Gyroscope(_) => Err(TranslationError::NotImplemented),
@@ -507,6 +513,7 @@ impl InputValue {
                         Capability::Accelerometer(_) => Err(TranslationError::NotImplemented),
                     },
                     Touch::Button(_) => self.translate_touch_button(target_cap, target_config),
+                    Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                 },
                 // RightPad -> ...
                 Touchpad::RightPad(touch) => match touch {
@@ -540,18 +547,21 @@ impl InputValue {
                                 Touch::Motion => Ok(self.clone()),
                                 // Touchpad Motion -> Touchpad Button
                                 Touch::Button(_) => Err(TranslationError::NotImplemented),
+                                Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                             },
                             Touchpad::RightPad(target_touch) => match target_touch {
                                 // Touchpad Motion -> Touchpad Motion
                                 Touch::Motion => Ok(self.clone()),
                                 // Touchpad Motion -> Touchpad Button
                                 Touch::Button(_) => Err(TranslationError::NotImplemented),
+                                Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                             },
                             Touchpad::CenterPad(target_touch) => match target_touch {
                                 // Touchpad Motion -> Touchpad Motion
                                 Touch::Motion => Ok(self.clone()),
                                 // Touchspad Motion -> Touchpad Button
                                 Touch::Button(_) => Err(TranslationError::NotImplemented),
+                                Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                             },
                         },
                         // Touchpad Motion -> Touchscreen ...
@@ -560,6 +570,7 @@ impl InputValue {
                             Touch::Motion => Ok(self.clone()),
                             // Touchpad Motion -> Touchscreen Button
                             Touch::Button(_) => Err(TranslationError::NotImplemented),
+                            Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                         },
                         // Touchpad Motion -> Gyroscope ...
                         Capability::Gyroscope(_) => Err(TranslationError::NotImplemented),
@@ -567,6 +578,7 @@ impl InputValue {
                         Capability::Accelerometer(_) => Err(TranslationError::NotImplemented),
                     },
                     Touch::Button(_) => self.translate_touch_button(target_cap, target_config),
+                    Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                 },
                 // CenterPad -> ...
                 Touchpad::CenterPad(touch) => match touch {
@@ -600,18 +612,21 @@ impl InputValue {
                                 Touch::Motion => Ok(self.clone()),
                                 // Touchpad Motion -> Touchpad Button
                                 Touch::Button(_) => Err(TranslationError::NotImplemented),
+                                Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                             },
                             Touchpad::RightPad(target_touch) => match target_touch {
                                 // Touchpad Motion -> Touchpad Motion
                                 Touch::Motion => Ok(self.clone()),
                                 // Touchpad Motion -> Touchpad Button
                                 Touch::Button(_) => Err(TranslationError::NotImplemented),
+                                Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                             },
                             Touchpad::CenterPad(target_touch) => match target_touch {
                                 // Touchpad Motion -> Touchpad Motion
                                 Touch::Motion => Ok(self.clone()),
                                 // Touchspad Motion -> Touchpad Button
                                 Touch::Button(_) => Err(TranslationError::NotImplemented),
+                                Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                             },
                         },
                         // Touchpad Motion -> Touchscreen ...
@@ -620,6 +635,7 @@ impl InputValue {
                             Touch::Motion => Ok(self.clone()),
                             // Touchpad Motion -> Touchscreen Button
                             Touch::Button(_) => Err(TranslationError::NotImplemented),
+                            Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                         },
                         // Touchpad Motion -> Gyroscope ...
                         Capability::Gyroscope(_) => Err(TranslationError::NotImplemented),
@@ -627,6 +643,7 @@ impl InputValue {
                         Capability::Accelerometer(_) => Err(TranslationError::NotImplemented),
                     },
                     Touch::Button(_) => self.translate_touch_button(target_cap, target_config),
+                    Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                 },
             },
 
@@ -665,18 +682,21 @@ impl InputValue {
                             Touch::Motion => Ok(self.clone()),
                             // Touchscreen Motion -> Touchpad Button
                             Touch::Button(_) => Err(TranslationError::NotImplemented),
+                            Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                         },
                         Touchpad::RightPad(target_touch) => match target_touch {
                             // Touchscreen Motion -> Touchpad Motion
                             Touch::Motion => Ok(self.clone()),
                             // Touchscreen Motion -> Touchpad Button
                             Touch::Button(_) => Err(TranslationError::NotImplemented),
+                            Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                         },
                         Touchpad::CenterPad(target_touch) => match target_touch {
                             // Touchscreen Motion -> Touchpad Motion
                             Touch::Motion => Ok(self.clone()),
                             // Touchscreen Motion -> Touchpad Button
                             Touch::Button(_) => Err(TranslationError::NotImplemented),
+                            Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                         },
                     },
                     // Touchscreen Motion -> Touchscreen ...
@@ -685,6 +705,7 @@ impl InputValue {
                         Touch::Motion => Ok(self.clone()),
                         // Touchscreen Motion -> Touchscreen Button
                         Touch::Button(_) => Err(TranslationError::NotImplemented),
+                        Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                     },
                     // Touchscreen Motion -> Gyroscope ...
                     Capability::Gyroscope(_) => Err(TranslationError::NotImplemented),
@@ -693,6 +714,19 @@ impl InputValue {
                 },
                 // Touchscreen Button -> ...
                 Touch::Button(_) => self.translate_touch_button(target_cap, target_config),
+                // Touchscreen Gesture -> ...
+                Touch::Gesture(_) => match target_cap {
+                    Capability::None => Ok(InputValue::None),
+                    Capability::NotImplemented => Ok(InputValue::None),
+                    Capability::Sync => Ok(InputValue::Bool(false)),
+                    Capability::Gamepad(Gamepad::Button(_)) => Ok(self.clone()),
+                    Capability::Gamepad(_) => Err(TranslationError::NotImplemented),
+                    Capability::Keyboard(_) => Ok(self.clone()),
+                    Capability::Mouse(Mouse::Button(_)) => Ok(self.clone()),
+                    Capability::Mouse(_) => Err(TranslationError::NotImplemented),
+                    Capability::DBus(_) => Ok(self.clone()),
+                    _ => Err(TranslationError::NotImplemented),
+                },
             },
             Capability::Gyroscope(_) => Err(TranslationError::NotImplemented),
             Capability::Accelerometer(_) => Err(TranslationError::NotImplemented),
@@ -1216,19 +1250,23 @@ impl InputValue {
                 Touchpad::LeftPad(touch) => match touch {
                     Touch::Motion => Err(TranslationError::NotImplemented),
                     Touch::Button(_) => Ok(self.clone()),
+                    Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                 },
                 Touchpad::RightPad(touch) => match touch {
                     Touch::Motion => Err(TranslationError::NotImplemented),
                     Touch::Button(_) => Ok(self.clone()),
+                    Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                 },
                 Touchpad::CenterPad(touch) => match touch {
                     Touch::Motion => Err(TranslationError::NotImplemented),
                     Touch::Button(_) => Ok(self.clone()),
+                    Touch::Gesture(_) => Err(TranslationError::NotImplemented),
                 },
             },
             Capability::Touchscreen(touch) => match touch {
                 Touch::Motion => Err(TranslationError::NotImplemented),
                 Touch::Button(_) => Ok(self.clone()),
+                Touch::Gesture(_) => Err(TranslationError::NotImplemented),
             },
             Capability::Gyroscope(_) => Err(TranslationError::NotImplemented),
             Capability::Accelerometer(_) => Err(TranslationError::NotImplemented),

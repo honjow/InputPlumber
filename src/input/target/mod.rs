@@ -3,6 +3,7 @@ pub mod command;
 pub mod dbus;
 pub mod debug;
 pub mod dualsense;
+mod gesture_pulse;
 pub mod horipad_steam;
 pub mod keyboard;
 pub mod mouse;
@@ -20,10 +21,11 @@ use std::{
     error::Error,
     io,
     sync::{Arc, Mutex, MutexGuard},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use debug::DebugDevice;
+use gesture_pulse::GesturePulses;
 use horipad_steam::HoripadSteamDevice;
 use steam_deck_uhid::SteamDeckUhidDevice;
 use thiserror::Error;
@@ -454,6 +456,7 @@ pub struct TargetDriver<T: TargetInputDevice + TargetOutputDevice> {
     implementation: Arc<Mutex<T>>,
     composite_device: Option<CompositeDeviceClient>,
     scheduled_events: Vec<ScheduledNativeEvent>,
+    gesture_pulses: GesturePulses,
     tx: mpsc::Sender<TargetCommand>,
     rx: mpsc::Receiver<TargetCommand>,
 }
@@ -480,6 +483,7 @@ impl<T: TargetInputDevice + TargetOutputDevice + Send + 'static> TargetDriver<T>
             implementation: Arc::new(Mutex::new(device)),
             composite_device: None,
             scheduled_events: Vec::new(),
+            gesture_pulses: GesturePulses::default(),
             rx,
             tx,
         }
@@ -498,9 +502,8 @@ impl<T: TargetInputDevice + TargetOutputDevice + Send + 'static> TargetDriver<T>
             Err(_) => false,
         };
 
-        // Spawn a blocking task to run the target device. The '?' operator should
-        // be avoided in this task so cleanup tasks can run to remove the DBus
-        // interface and stop the device if an error occurs.
+        // Run the target device in its own task. All loop exits pass through
+        // cleanup so queued gesture releases and device shutdown are not skipped.
         let client = self.client();
         let task: JoinHandle<Result<(), Box<dyn Error + Send + Sync>>> = tokio::task::spawn(
             async move {
@@ -524,7 +527,7 @@ impl<T: TargetInputDevice + TargetOutputDevice + Send + 'static> TargetDriver<T>
 
                 log::debug!("Target device running: {}", self.dbus.path());
                 let mut interval = tokio::time::interval(self.options.poll_rate);
-                loop {
+                let run_result: Result<(), Box<dyn Error + Send + Sync>> = 'run: loop {
                     // Find any scheduled events that are ready to be sent
                     let mut ready_events = vec![];
                     let mut i = 0;
@@ -541,7 +544,7 @@ impl<T: TargetInputDevice + TargetOutputDevice + Send + 'static> TargetDriver<T>
                         let mut implementation = self.implementation.lock().unwrap();
                         if let Err(e) = implementation.write_event(event.into()) {
                             log::error!("Error writing event: {e:?}");
-                            break;
+                            break 'run Err(e.to_string().into());
                         }
                     }
 
@@ -554,9 +557,19 @@ impl<T: TargetInputDevice + TargetOutputDevice + Send + 'static> TargetDriver<T>
                             rx,
                             &metrics_tx,
                             &mut implementation,
+                            &mut self.gesture_pulses,
                         ) {
                             log::debug!("Error receiving commands: {e:?}");
-                            break;
+                            break 'run Ok(());
+                        }
+                    }
+
+                    // Emit at most one gesture transition per button per poll.
+                    for event in self.gesture_pulses.poll(Instant::now()) {
+                        let mut implementation = self.implementation.lock().unwrap();
+                        if let Err(e) = Self::write_event(&metrics_tx, &mut implementation, event) {
+                            log::error!("Error writing gesture event: {e:?}");
+                            break 'run Err(e.to_string().into());
                         }
                     }
 
@@ -575,7 +588,7 @@ impl<T: TargetInputDevice + TargetOutputDevice + Send + 'static> TargetDriver<T>
                             Ok(events) => events,
                             Err(e) => {
                                 log::error!("Error polling target device: {e:?}");
-                                break;
+                                break 'run Err(e.to_string().into());
                             }
                         };
                         events
@@ -588,7 +601,7 @@ impl<T: TargetInputDevice + TargetOutputDevice + Send + 'static> TargetDriver<T>
                         // Send the output event to source devices
                         let result = client.process_output_event(event).await;
                         if let Err(e) = result {
-                            return Err(e.to_string().into());
+                            break 'run Err(e.to_string().into());
                         }
                     }
 
@@ -597,20 +610,26 @@ impl<T: TargetInputDevice + TargetOutputDevice + Send + 'static> TargetDriver<T>
                         _ = interval.tick() => (),
                         Some(cmd) = rx.recv() => {
                             let mut implementation = self.implementation.lock().unwrap();
-                            let result = Self::process_command(&self.type_id, &mut composite_device, &metrics_tx, &mut implementation, cmd);
+                            let result = Self::process_command(&self.type_id, &mut composite_device, &metrics_tx, &mut implementation, cmd, &mut self.gesture_pulses);
                             if let Err(e) = result {
                                 log::debug!("Error processing received command: {e}");
-                                break;
+                                break 'run Ok(());
                             }
                         }
                     }
-                }
+                };
 
-                // Stop the device
+                // Stop exactly once, even when forwarding output or emitting
+                // queued input failed. Drop macro events with this driver.
                 log::debug!("Target device stopping: {}", self.dbus.path());
-                self.implementation.lock().unwrap().stop()?;
+                self.scheduled_events.clear();
+                let stop_result = Self::stop_implementation(
+                    &mut self.implementation.lock().unwrap(),
+                    &mut self.gesture_pulses,
+                );
                 log::debug!("Target device stopped: {}", self.dbus.path());
-
+                run_result?;
+                stop_result?;
                 Ok(())
             },
         );
@@ -659,6 +678,7 @@ impl<T: TargetInputDevice + TargetOutputDevice + Send + 'static> TargetDriver<T>
         rx: &mut mpsc::Receiver<TargetCommand>,
         metrics_tx: &Option<mpsc::Sender<(Capability, EventContext)>>,
         implementation: &mut MutexGuard<'_, T>,
+        gesture_pulses: &mut GesturePulses,
     ) -> Result<(), Box<dyn Error>> {
         const MAX_COMMANDS: u8 = 64;
         let mut commands_processed = 0;
@@ -670,6 +690,7 @@ impl<T: TargetInputDevice + TargetOutputDevice + Send + 'static> TargetDriver<T>
                     metrics_tx,
                     implementation,
                     cmd,
+                    gesture_pulses,
                 )?,
                 Err(e) => match e {
                     TryRecvError::Empty => return Ok(()),
@@ -695,10 +716,13 @@ impl<T: TargetInputDevice + TargetOutputDevice + Send + 'static> TargetDriver<T>
         metrics_tx: &Option<mpsc::Sender<(Capability, EventContext)>>,
         implementation: &mut MutexGuard<'_, T>,
         cmd: TargetCommand,
+        gesture_pulses: &mut GesturePulses,
     ) -> Result<(), Box<dyn Error>> {
         match cmd {
             TargetCommand::WriteEvent(event) => {
-                Self::write_event(metrics_tx, implementation, event)?;
+                if let Some(event) = gesture_pulses.submit(event, Instant::now()) {
+                    Self::write_event(metrics_tx, implementation, event)?;
+                }
             }
             TargetCommand::SetCompositeDevice(device) => {
                 *composite_device = Some(device.clone());
@@ -727,15 +751,43 @@ impl<T: TargetInputDevice + TargetOutputDevice + Send + 'static> TargetDriver<T>
                 });
             }
             TargetCommand::ClearState => {
+                let release_result = Self::clear_gesture_state(implementation, gesture_pulses);
                 implementation.clear_state();
+                release_result?;
             }
             TargetCommand::Stop => {
-                implementation.stop()?;
+                // The run loop owns cleanup. Calling stop here would stop the
+                // same UHID/USB implementation twice and can block shutdown.
                 return Err("Target device stopped".into());
             }
         }
 
         Ok(())
+    }
+
+    /// Release active synthetic presses before discarding their pending ups.
+    fn clear_gesture_state(
+        implementation: &mut MutexGuard<'_, T>,
+        gesture_pulses: &mut GesturePulses,
+    ) -> Result<(), InputError> {
+        let mut result = Ok(());
+        for release in gesture_pulses.clear() {
+            if let Err(err) = implementation.write_event(release) {
+                result = Err(err);
+            }
+        }
+        result
+    }
+
+    fn stop_implementation(
+        implementation: &mut MutexGuard<'_, T>,
+        gesture_pulses: &mut GesturePulses,
+    ) -> Result<(), InputError> {
+        let release_result = Self::clear_gesture_state(implementation, gesture_pulses);
+        implementation.clear_state();
+        let stop_result = implementation.stop();
+        // A failed release must not prevent the underlying device from stopping.
+        release_result.and(stop_result)
     }
 
     /// Write the event to the underlying target device implementation
@@ -1045,4 +1097,221 @@ pub fn generate_deck_serial(persistent_id: &str) -> String {
 pub fn generate_deck_board_serial(persistent_id: &str) -> String {
     let hash = hash_id(persistent_id.as_bytes());
     format!("M0BA{:06}", hash % 1_000_000)
+}
+
+#[cfg(test)]
+mod gesture_command_tests {
+    use super::*;
+    use crate::input::{
+        capability::{Gamepad, GamepadButton, GestureType, Keyboard, Mouse, MouseButton, Touch},
+        event::value::InputValue,
+    };
+
+    #[derive(Default)]
+    struct RecordingTarget {
+        events: Vec<NativeEvent>,
+        cleared: bool,
+        stops: usize,
+        fail_writes: bool,
+    }
+
+    impl TargetInputDevice for RecordingTarget {
+        fn write_event(&mut self, event: NativeEvent) -> Result<(), InputError> {
+            if self.fail_writes {
+                return Err("injected write failure".into());
+            }
+            self.events.push(event);
+            Ok(())
+        }
+
+        fn clear_state(&mut self) {
+            self.cleared = true;
+        }
+
+        fn stop(&mut self) -> Result<(), InputError> {
+            self.stops += 1;
+            Ok(())
+        }
+    }
+
+    impl TargetOutputDevice for RecordingTarget {}
+
+    fn queued_gesture(cap: Capability) -> GesturePulses {
+        let mut pulses = GesturePulses::default();
+        let now = Instant::now();
+        for pressed in [true, false] {
+            pulses.submit(
+                NativeEvent::new_translated(
+                    Capability::Touchscreen(Touch::Gesture(GestureType::Up)),
+                    cap.clone(),
+                    InputValue::Bool(pressed),
+                ),
+                now,
+            );
+        }
+        pulses
+    }
+
+    #[test]
+    fn clear_state_releases_keyboard_and_mouse_gesture_presses() {
+        for cap in [
+            Capability::Keyboard(Keyboard::KeyEsc),
+            Capability::Mouse(Mouse::Button(MouseButton::Left)),
+        ] {
+            let target = Mutex::new(RecordingTarget::default());
+            let mut implementation = target.lock().unwrap();
+            let mut pulses = queued_gesture(cap.clone());
+            TargetDriver::<RecordingTarget>::process_command(
+                &"keyboard".try_into().unwrap(),
+                &mut None,
+                &None,
+                &mut implementation,
+                TargetCommand::ClearState,
+                &mut pulses,
+            )
+            .unwrap();
+            assert!(implementation.cleared);
+            assert_eq!(implementation.events.len(), 1);
+            assert_eq!(implementation.events[0].as_capability(), cap);
+            assert!(!implementation.events[0].pressed());
+            assert!(pulses
+                .poll(Instant::now() + Duration::from_secs(1))
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn stop_command_defers_single_shutdown_to_cleanup() {
+        let target = Mutex::new(RecordingTarget::default());
+        let mut implementation = target.lock().unwrap();
+        let mut pulses = queued_gesture(Capability::Keyboard(Keyboard::KeyEsc));
+        assert!(TargetDriver::<RecordingTarget>::process_command(
+            &"keyboard".try_into().unwrap(),
+            &mut None,
+            &None,
+            &mut implementation,
+            TargetCommand::Stop,
+            &mut pulses,
+        )
+        .is_err());
+        assert_eq!(implementation.stops, 0);
+        TargetDriver::<RecordingTarget>::stop_implementation(&mut implementation, &mut pulses)
+            .unwrap();
+        assert_eq!(implementation.stops, 1);
+        assert!(implementation.cleared);
+        assert_eq!(implementation.events.len(), 1);
+        assert!(!implementation.events[0].pressed());
+        assert!(pulses
+            .poll(Instant::now() + Duration::from_secs(1))
+            .is_empty());
+    }
+
+    #[test]
+    fn failed_gesture_release_still_stops_the_target() {
+        let target = Mutex::new(RecordingTarget {
+            fail_writes: true,
+            ..Default::default()
+        });
+        let mut implementation = target.lock().unwrap();
+        let mut pulses = queued_gesture(Capability::Keyboard(Keyboard::KeyEsc));
+        assert!(TargetDriver::<RecordingTarget>::stop_implementation(
+            &mut implementation,
+            &mut pulses
+        )
+        .is_err());
+        assert!(implementation.cleared);
+        assert_eq!(implementation.stops, 1);
+        assert!(pulses
+            .poll(Instant::now() + Duration::from_secs(1))
+            .is_empty());
+    }
+
+    #[test]
+    fn clear_state_command_cancels_gesture_queue_without_delaying_physical_input() {
+        let target = Mutex::new(RecordingTarget::default());
+        let mut implementation = target.lock().unwrap();
+        let mut pulses = GesturePulses::default();
+        let cap = Capability::Gamepad(Gamepad::Button(GamepadButton::Guide));
+        for pressed in [true, false] {
+            let event = NativeEvent::new_translated(
+                Capability::Touchscreen(Touch::Gesture(GestureType::Up)),
+                cap.clone(),
+                InputValue::Bool(pressed),
+            );
+            TargetDriver::<RecordingTarget>::process_command(
+                &"deck-uhid".try_into().unwrap(),
+                &mut None,
+                &None,
+                &mut implementation,
+                TargetCommand::WriteEvent(event),
+                &mut pulses,
+            )
+            .unwrap();
+        }
+        assert_eq!(implementation.events.len(), 1);
+        TargetDriver::<RecordingTarget>::process_command(
+            &"deck-uhid".try_into().unwrap(),
+            &mut None,
+            &None,
+            &mut implementation,
+            TargetCommand::ClearState,
+            &mut pulses,
+        )
+        .unwrap();
+        assert!(implementation.cleared);
+        assert!(pulses
+            .poll(Instant::now() + Duration::from_secs(1))
+            .is_empty());
+        for pressed in [true, false] {
+            TargetDriver::<RecordingTarget>::process_command(
+                &"deck-uhid".try_into().unwrap(),
+                &mut None,
+                &None,
+                &mut implementation,
+                TargetCommand::WriteEvent(NativeEvent::new(cap.clone(), InputValue::Bool(pressed))),
+                &mut pulses,
+            )
+            .unwrap();
+        }
+        assert_eq!(implementation.events.len(), 4);
+        assert!(!implementation.events[1].pressed());
+        assert!(implementation.events[2].pressed());
+        assert!(!implementation.events[3].pressed());
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn identity_hash_and_mac_keep_upstream_stable_vectors() {
+        assert_eq!(hash_id(b""), 0xcbf29ce484222325);
+        assert_eq!(hash_id(b"hello"), 0xa430d84680aabd0b);
+        let prefix = [0x02, 0x12, 0x34];
+        assert_eq!(
+            generate_mac(prefix, "hello"),
+            [0x02, 0x12, 0x34, 0xaa, 0xbd, 0x0b]
+        );
+        assert_ne!(
+            generate_mac(prefix, "hello"),
+            generate_mac(prefix, "other-device")
+        );
+    }
+
+    #[test]
+    fn deck_identity_is_repeatable_and_has_expected_shapes() {
+        assert_eq!(generate_deck_serial("hello"), "4680AABD0B");
+        let serial = generate_deck_serial("stable-device-id");
+        assert_eq!(serial, generate_deck_serial("stable-device-id"));
+        assert_eq!(serial.len(), 10);
+        assert!(serial
+            .bytes()
+            .all(|ch| ch.is_ascii_digit() || (b'A'..=b'F').contains(&ch)));
+        let board = generate_deck_board_serial("stable-device-id");
+        assert_eq!(board, generate_deck_board_serial("stable-device-id"));
+        assert_eq!(board.len(), 10);
+        assert!(board.starts_with("M0BA"));
+        assert!(board[4..].bytes().all(|ch| ch.is_ascii_digit()));
+    }
 }
