@@ -97,7 +97,7 @@ impl IioDevice {
             DriverType::Unknown => Err("No driver for iio interface found".into()),
             DriverType::BmiImu => {
                 let options = SourceDriverOptions {
-                    poll_rate: Duration::from_millis(0),
+                    poll_rate: Duration::from_micros(2500),
                     buffer_size: 2048,
                 };
                 let device = BmiImu::new(device_info.clone(), conf.clone())?;
@@ -112,7 +112,7 @@ impl IioDevice {
             }
             DriverType::AccelGryo3D => {
                 let options = SourceDriverOptions {
-                    poll_rate: Duration::from_millis(0),
+                    poll_rate: Duration::from_micros(2500),
                     buffer_size: 2048,
                 };
                 let device = AccelGyro3dImu::new(device_info.clone(), conf.clone())?;

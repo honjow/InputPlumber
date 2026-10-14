@@ -137,6 +137,8 @@ source_devices:
         - Keyboard:KeyRightBrace
 
   # IMU
+  # Keep firmware-advertised sample rates: production HID Sensor Hub testing
+  # found that custom gyro rates could stall reads on this model.
   - group: imu
     iio:
       name: accel_3d

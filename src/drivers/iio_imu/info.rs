@@ -3,18 +3,18 @@ use std::{
     error::Error,
     fmt, fs,
     io::{self, Read},
-    os::fd::AsRawFd,
+    os::{
+        fd::{AsRawFd, RawFd},
+        unix::fs::OpenOptionsExt,
+    },
     path::{Path, PathBuf},
     thread,
     time::Duration,
 };
 
-use nix::libc::{self, c_int};
+use nix::libc;
 
 use crate::drivers::iio_imu::event::AxisData;
-
-/// Maximum delay before triggering device stall actions.
-const STALL_TIMEOUT_MS: c_int = 2000;
 
 const DEFAULT_SAMPLE_RATE: f64 = 200.0;
 
@@ -87,61 +87,90 @@ impl fmt::Display for MountMatrix {
     }
 }
 
-/// Blocks until exactly one record's worth of bytes is available, then
-/// fills `buf` with it.
+/// A complete raw IIO record, or a retryable error when no complete record is
+/// ready. Descriptors are owned by the source and refreshed by the source loop
+/// after every lifecycle transition; this layer must never wait for samples.
 pub trait RecordSource: fmt::Debug + Send {
     fn read_one(&mut self, buf: &mut [u8]) -> io::Result<()>;
+    fn poll_fd(&self) -> RawFd;
 }
 
 #[derive(Debug)]
-pub struct BlockingFdSource {
+pub struct NonblockingFdSource {
     file: fs::File,
     kick_path: Option<PathBuf>,
+    pending: Vec<u8>,
+    filled: usize,
 }
 
-impl BlockingFdSource {
+impl NonblockingFdSource {
     pub fn open(devnode: &Path, kick_path: Option<PathBuf>) -> io::Result<Self> {
-        let file = fs::OpenOptions::new().read(true).open(devnode)?;
-        Ok(Self { file, kick_path })
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(devnode)?;
+        Ok(Self {
+            file,
+            kick_path,
+            pending: Vec::new(),
+            filled: 0,
+        })
     }
 }
 
-impl RecordSource for BlockingFdSource {
+impl RecordSource for NonblockingFdSource {
     fn read_one(&mut self, buf: &mut [u8]) -> io::Result<()> {
-        if let Some(path) = &self.kick_path {
-            let _ = fs::read_to_string(path);
+        if buf.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "empty IIO record",
+            ));
         }
-        wait_readable(self.file.as_raw_fd())?;
-        self.file.read_exact(buf)
+        if self.pending.len() != buf.len() {
+            if self.filled != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "IIO record size changed",
+                ));
+            }
+            self.pending.resize(buf.len(), 0);
+        }
+        if self.filled == 0 {
+            if let Some(path) = &self.kick_path {
+                // HID sensor hubs may need a raw read to request their next sample.
+                // Like the direct sysfs fallback, this kernel operation can be slow
+                // during resume; the raw-buffer fd itself always stays nonblocking.
+                let _ = fs::read_to_string(path);
+            }
+        }
+        // Read at most once per poll: partial records survive EAGAIN/EINTR without
+        // being decoded, and the source loop remains responsive to lifecycle commands.
+        let read = self.file.read(&mut self.pending[self.filled..])?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "IIO buffer closed",
+            ));
+        }
+        self.filled += read;
+        if self.filled < self.pending.len() {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        buf.copy_from_slice(&self.pending);
+        self.filled = 0;
+        Ok(())
+    }
+
+    fn poll_fd(&self) -> RawFd {
+        self.file.as_raw_fd()
     }
 }
 
-fn wait_readable(fd: c_int) -> io::Result<()> {
-    let mut fds = [libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    }];
-    loop {
-        let ret = unsafe { libc::poll(fds.as_mut_ptr(), 1, STALL_TIMEOUT_MS) };
-        if ret < 0 {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(err);
-        }
-        // Timeouts are transient; keep waiting. Only the poll errors below
-        // are fatal.
-        if ret == 0 {
-            log::warn!("No IMU sample within {STALL_TIMEOUT_MS} ms; waiting for the trigger to resume");
-            continue;
-        }
-        if fds[0].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
-            return Err(io::Error::other("iio buffer devnode reported error/hangup"));
-        }
-        return Ok(());
-    }
+pub fn is_retryable_read_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+    )
 }
 
 /// Parsed form of a `scan_elements/in_*_type` value, e.g. "le:s16/16>>0".
@@ -167,7 +196,9 @@ impl ScanFormat {
             other => return Err(format!("unknown endianness '{other}' in scan type '{s}'").into()),
         };
 
-        let (sign, rest) = rest.split_at(1);
+        let (sign, rest) = rest
+            .split_at_checked(1)
+            .ok_or_else(|| format!("malformed scan type '{s}' (missing sign)"))?;
         let signed = match sign {
             "s" => true,
             "u" => false,
@@ -184,6 +215,12 @@ impl ScanFormat {
             .ok_or_else(|| format!("malformed scan type '{s}' (missing shift)"))?;
         let storage_bits: u8 = storage_str.parse()?;
         let shift: u8 = shift_str.parse()?;
+        if !matches!(storage_bits, 8 | 16 | 32 | 64)
+            || real_bits == 0
+            || u16::from(real_bits) + u16::from(shift) > u16::from(storage_bits)
+        {
+            return Err(format!("unsupported scan type '{s}'").into());
+        }
 
         Ok(Self {
             little_endian,
@@ -336,6 +373,108 @@ pub fn discover_timestamp(
     Ok(Some((scan_index, format)))
 }
 
+/// Direct sysfs channels do not require a character device or scan_elements.
+/// This is essential for AMD SFH devices configured with use_buffer: false.
+#[derive(Debug, Clone)]
+pub struct SysfsChannel {
+    path: PathBuf,
+    axis: char,
+    offset: f64,
+    scale: f64,
+}
+
+pub fn discover_sysfs_group(base: &Path, prefix: &str) -> Vec<SysfsChannel> {
+    ['x', 'y', 'z']
+        .into_iter()
+        .filter_map(|axis| {
+            let id = format!("in_{prefix}_{axis}");
+            let path = base.join(format!("{id}_raw"));
+            if !path.exists() {
+                return None;
+            }
+            let attribute = |name: &str, default| {
+                read_trim(&base.join(format!("{id}_{name}")))
+                    .ok()
+                    .or_else(|| read_trim(&base.join(format!("in_{prefix}_{name}"))).ok())
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .unwrap_or(default)
+            };
+            Some(SysfsChannel {
+                path,
+                axis,
+                offset: attribute("offset", 0.0),
+                scale: attribute("scale", 1.0),
+            })
+        })
+        .collect()
+}
+
+pub fn read_sysfs_group(channels: &[SysfsChannel]) -> io::Result<Option<AxisData>> {
+    if channels.is_empty() {
+        return Ok(None);
+    }
+    // Sysfs values are converted per-axis before rotation, retaining fractional
+    // offsets and non-uniform scales. Translation still applies SI corrections once.
+    let mut data = AxisData {
+        scale: 1.0,
+        ..Default::default()
+    };
+    for channel in channels {
+        let raw: f64 = read_trim(&channel.path)?
+            .parse()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let value = (raw + channel.offset) * channel.scale;
+        match channel.axis {
+            'x' => data.roll = value,
+            'y' => data.pitch = value,
+            'z' => data.yaw = value,
+            _ => unreachable!(),
+        }
+    }
+    Ok(Some(data))
+}
+
+pub fn configure_sysfs_rate(
+    base: &Path,
+    accel: &[SysfsChannel],
+    gyro: &[SysfsChannel],
+    sample_rate: Option<f64>,
+) -> f64 {
+    // Reuse rate negotiation without requiring scan metadata.
+    let channels = |group: &[SysfsChannel]| {
+        group
+            .iter()
+            .map(|channel| DiscoveredChannel {
+                id: channel
+                    .path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .trim_end_matches("_raw")
+                    .to_string(),
+                axis: channel.axis,
+                scan_index: 0,
+                format: ScanFormat {
+                    little_endian: true,
+                    signed: true,
+                    storage_bits: 64,
+                    real_bits: 64,
+                    shift: 0,
+                },
+                offset: 0,
+                scale: channel.scale,
+            })
+            .collect::<Vec<_>>()
+    };
+    let accel_rate = negotiate_sample_rate(base, &channels(accel), "accel", sample_rate);
+    let gyro_rate = negotiate_sample_rate(base, &channels(gyro), "anglvel", sample_rate);
+    if !accel.is_empty() {
+        accel_rate
+    } else {
+        gyro_rate
+    }
+}
+
 enum ScanEntry {
     Accel(DiscoveredChannel),
     Gyro(DiscoveredChannel),
@@ -429,11 +568,7 @@ pub fn group_scale(group: &HashMap<char, ChannelLayout>, group_name: &str) -> f6
 
 /// Decode one sample group from a raw IIO record using the pre-computed
 /// channel layout.
-pub fn decode_group(
-    layout: &HashMap<char, ChannelLayout>,
-    scale: f64,
-    record: &[u8],
-) -> AxisData {
+pub fn decode_group(layout: &HashMap<char, ChannelLayout>, scale: f64, record: &[u8]) -> AxisData {
     let mut out = AxisData {
         scale,
         ..Default::default()
@@ -441,7 +576,7 @@ pub fn decode_group(
     for (&axis, chan) in layout.iter() {
         let end = chan.byte_offset + chan.format.storage_bytes();
         let raw = chan.format.decode(&record[chan.byte_offset..end]);
-        let value = (raw - chan.offset) as f64;
+        let value = raw as f64 + chan.offset as f64;
         match axis {
             'x' => out.roll = value,
             'y' => out.pitch = value,
@@ -482,6 +617,7 @@ fn write_str_verified(path: &Path, value: &str) -> Result<(), Box<dyn Error + Se
 const HRTIMER_TRIGGER_ROOT: &str = "/sys/kernel/config/iio/triggers/hrtimer";
 
 /// How to obtain the trigger bound to a buffer during setup.
+#[derive(Clone, Debug)]
 pub enum TriggerStrategy {
     /// Search for an existing IIO trigger that already references this device.
     FindExisting,
@@ -492,9 +628,10 @@ pub enum TriggerStrategy {
 /// Unbinds and removes a dedicated hrtimer trigger when the owning
 /// driver is dropped, so it doesn't accumulate in configfs across
 /// restarts or unplug/replug cycles.
+#[derive(Debug)]
 pub struct HrtimerTriggerGuard {
     base: PathBuf,
-    name: String,
+    trigger_dir: PathBuf,
 }
 
 impl Drop for HrtimerTriggerGuard {
@@ -506,11 +643,10 @@ impl Drop for HrtimerTriggerGuard {
         };
         let _ = fs::write(buffer_dir.join("enable"), "0");
         let _ = fs::write(self.base.join("trigger/current_trigger"), "");
-        let trigger_dir = Path::new(HRTIMER_TRIGGER_ROOT).join(&self.name);
-        if let Err(e) = fs::remove_dir(&trigger_dir) {
+        if let Err(e) = fs::remove_dir(&self.trigger_dir) {
             log::warn!(
                 "Failed to remove hrtimer trigger {}: {e}",
-                trigger_dir.display()
+                self.trigger_dir.display()
             );
         }
     }
@@ -520,6 +656,7 @@ fn bind_trigger(
     base: &Path,
     strategy: &TriggerStrategy,
     rate: f64,
+    hrtimer_root: &Path,
 ) -> Result<Option<HrtimerTriggerGuard>, Box<dyn Error + Send + Sync>> {
     match strategy {
         TriggerStrategy::FindExisting => {
@@ -535,12 +672,12 @@ fn bind_trigger(
             Ok(None)
         }
         TriggerStrategy::Hrtimer(name) => {
-            if !Path::new(HRTIMER_TRIGGER_ROOT).is_dir() {
+            if !hrtimer_root.is_dir() {
                 return Err(
                     "hrtimer trigger support not available - is iio_trig_hrtimer loaded?".into(),
                 );
             }
-            let trigger_dir = Path::new(HRTIMER_TRIGGER_ROOT).join(name);
+            let trigger_dir = hrtimer_root.join(name);
             if !trigger_dir.is_dir() {
                 fs::create_dir(&trigger_dir).map_err(|e| {
                     format!(
@@ -550,9 +687,16 @@ fn bind_trigger(
                 })?;
             }
 
+            // Own cleanup before any following operation can fail.
+            let guard = HrtimerTriggerGuard {
+                base: base.to_path_buf(),
+                trigger_dir,
+            };
+
             // The hrtimer trigger only latches sampling_frequency at
             // bind/enable time, so this must happen before it's bound.
-            match find_trigger_device(name) {
+            let devices_root = base.parent().ok_or("IIO device has no parent directory")?;
+            match find_trigger_device(name, devices_root) {
                 Some(trig_dev) => {
                     let path = trig_dev.join("sampling_frequency");
                     match fs::write(&path, rate.to_string()) {
@@ -572,22 +716,43 @@ fn bind_trigger(
             write_str_verified(&base.join("trigger/current_trigger"), name)
                 .map_err(|e| format!("failed to bind hrtimer trigger '{name}': {e}"))?;
 
-            Ok(Some(HrtimerTriggerGuard {
-                base: base.to_path_buf(),
-                name: name.clone(),
-            }))
+            Ok(Some(guard))
         }
+    }
+}
+
+fn bind_trigger_with_fallback(
+    base: &Path,
+    strategy: &TriggerStrategy,
+    rate: f64,
+    hrtimer_root: &Path,
+) -> Result<Option<HrtimerTriggerGuard>, Box<dyn Error + Send + Sync>> {
+    match bind_trigger(base, strategy, rate, hrtimer_root) {
+        Ok(guard) => Ok(guard),
+        Err(error) if matches!(strategy, TriggerStrategy::Hrtimer(_)) => {
+            // A missing hrtimer module/configfs must not discard a functioning
+            // hardware trigger. If neither is usable, the caller uses sysfs.
+            log::warn!("Dedicated hrtimer unavailable: {error}; trying matched hardware trigger");
+            let Some(existing) = find_trigger_for(base)? else {
+                return Err(error);
+            };
+            write_str_verified(&base.join("trigger/current_trigger"), &existing)?;
+            Ok(None)
+        }
+        Err(error) => Err(error),
     }
 }
 
 /// Finds the `/sys/bus/iio/devices/triggerN` entry matching `name` exactly.
 /// Doesn't gate on `trigger_now` since hrtimer triggers don't expose it.
-fn find_trigger_device(name: &str) -> Option<PathBuf> {
-    let devices_root = Path::new("/sys/bus/iio/devices");
+fn find_trigger_device(name: &str, devices_root: &Path) -> Option<PathBuf> {
     fs::read_dir(devices_root)
         .ok()?
         .filter_map(|e| e.ok())
         .find_map(|entry| {
+            if !entry.file_name().to_string_lossy().starts_with("trigger") {
+                return None;
+            }
             let path = entry.path();
             (read_trim(&path.join("name")).ok()? == name).then_some(path)
         })
@@ -606,23 +771,23 @@ fn find_trigger_for(base: &Path) -> Result<Option<String>, Box<dyn Error + Send 
         .and_then(|p| p.parent().map(Path::to_path_buf));
     let mut fallback: Option<String> = None;
 
-    let devices_root = Path::new("/sys/bus/iio/devices");
+    let devices_root = base.parent().ok_or("IIO device has no parent directory")?;
     for entry in fs::read_dir(devices_root)? {
-        let path = entry?.path();
-        if path == base || !path.join("trigger_now").exists() {
-            continue; // not a trigger device
+        let entry = entry?;
+        let path = entry.path();
+        // Hardware data-ready triggers do not expose trigger_now; use the IIO
+        // trigger device name rather than that software-trigger-only attribute.
+        if !entry.file_name().to_string_lossy().starts_with("trigger") {
+            continue;
         }
         let Ok(name) = read_trim(&path.join("name")) else {
             continue;
         };
-        let is_sibling = own_parent
-            .as_ref()
-            .and_then(|parent| {
-                fs::canonicalize(&path)
-                    .ok()
-                    .and_then(|p| p.parent().map(|p| p == parent.as_path()))
-            })
-            == Some(true);
+        let is_sibling = own_parent.as_ref().and_then(|parent| {
+            fs::canonicalize(&path)
+                .ok()
+                .and_then(|p| p.parent().map(|p| p == parent.as_path()))
+        }) == Some(true);
         if is_sibling {
             return Ok(Some(name));
         }
@@ -696,8 +861,13 @@ fn negotiate_sample_rate(
     if channels.is_empty() {
         return DEFAULT_SAMPLE_RATE;
     }
-    let rate = target.unwrap_or(DEFAULT_SAMPLE_RATE);
-    let avail = read_available_rates(base, channels, prefix);
+    let rate = target
+        .filter(|rate| rate.is_finite() && *rate > 0.0)
+        .unwrap_or(DEFAULT_SAMPLE_RATE);
+    let avail: Vec<f64> = read_available_rates(base, channels, prefix)
+        .into_iter()
+        .filter(|rate| rate.is_finite() && *rate > 0.0)
+        .collect();
 
     let chosen = if avail.is_empty() {
         log::warn!("No available sample rates reported for {prefix}; requesting {rate} Hz anyway");
@@ -719,19 +889,60 @@ fn negotiate_sample_rate(
 /// Clear any leftover enabled/triggered state from a previous crashed
 /// instance before reconfiguring.
 fn warm_reset(base: &Path, buffer_dir: &Path) {
-    let _ = fs::write(base.join("trigger/current_trigger"), "");
     if fs::write(buffer_dir.join("enable"), "0").is_err() {
         thread::sleep(Duration::from_millis(100));
         let _ = fs::write(buffer_dir.join("enable"), "0");
     }
+    let _ = fs::write(base.join("trigger/current_trigger"), "");
     thread::sleep(Duration::from_millis(50));
 }
 
-/// Result of `configure_buffer`. `trigger_guard` must be kept alive while
-/// the buffer is in use, and is only `Some` for `TriggerStrategy::Hrtimer`.
+/// Own every buffer, including hardware-triggered ones. Dropping a driver on
+/// suspend, stop, or failed setup must leave direct-mode sysfs usable again.
+#[derive(Debug)]
+pub struct BufferGuard {
+    base: PathBuf,
+    buffer_dir: PathBuf,
+    _trigger_guard: Option<HrtimerTriggerGuard>,
+}
+
+impl Drop for BufferGuard {
+    fn drop(&mut self) {
+        disable_buffer(&self.base, &self.buffer_dir);
+    }
+}
+
+fn disable_scan_elements(base: &Path) {
+    if let Ok(entries) = fs::read_dir(base.join("scan_elements")) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().ends_with("_en") {
+                let _ = fs::write(entry.path(), "0");
+            }
+        }
+    }
+}
+
+fn disable_buffer(base: &Path, buffer_dir: &Path) {
+    let _ = fs::write(buffer_dir.join("enable"), "0");
+    let _ = fs::write(base.join("trigger/current_trigger"), "");
+    disable_scan_elements(base);
+}
+
+/// Release residual buffer ownership before direct sysfs reads. Missing buffer
+/// or trigger paths are expected on sysfs-only devices such as AMD SFH.
+pub fn cleanup_buffer(base: &Path) {
+    let buffer_dir = if base.join("buffer0").is_dir() {
+        base.join("buffer0")
+    } else {
+        base.join("buffer")
+    };
+    disable_buffer(base, &buffer_dir);
+}
+
+/// Result of `configure_buffer`. The guard must outlive all buffer reads.
 pub struct BufferConfig {
     pub rate: f64,
-    pub trigger_guard: Option<HrtimerTriggerGuard>,
+    pub guard: BufferGuard,
 }
 
 /// Run the setup sequence
@@ -750,6 +961,11 @@ pub fn configure_buffer(
     let scan_dir = base.join("scan_elements");
 
     warm_reset(base, &buffer_dir);
+    let mut guard = BufferGuard {
+        base: base.to_path_buf(),
+        buffer_dir: buffer_dir.clone(),
+        _trigger_guard: None,
+    };
 
     write_bool_verified(&buffer_dir.join("enable"), false)
         .map_err(|e| format!("failed to disable buffer before reconfiguring: {e}"))?;
@@ -762,8 +978,20 @@ pub fn configure_buffer(
         gyro_rate
     };
 
-    let trigger_guard = bind_trigger(base, &trigger, effective_rate)?;
+    guard._trigger_guard = bind_trigger_with_fallback(
+        base,
+        &trigger,
+        effective_rate,
+        Path::new(HRTIMER_TRIGGER_ROOT),
+    )?;
 
+    // Remove stale enabled channels before computing the exact selected layout.
+    for entry in fs::read_dir(&scan_dir)? {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().ends_with("_en") {
+            write_bool_verified(&entry.path(), false)?;
+        }
+    }
     for chan in accel.iter().chain(gyro.iter()) {
         write_bool_verified(&scan_dir.join(format!("{}_en", chan.id)), true)
             .map_err(|e| format!("failed to enable scan element {}: {e}", chan.id))?;
@@ -793,6 +1021,308 @@ pub fn configure_buffer(
 
     Ok(BufferConfig {
         rate: effective_rate,
-        trigger_guard,
+        guard,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::drivers::iio_imu::test_support::TestDir;
+    use std::{
+        io::Write,
+        os::{fd::OwnedFd, unix::net::UnixStream},
+    };
+
+    #[test]
+    fn raw_fd_open_is_nonblocking() {
+        let source = NonblockingFdSource::open(Path::new("/dev/null"), None).unwrap();
+        let flags = nix::fcntl::fcntl(&source.file, nix::fcntl::FcntlArg::F_GETFL).unwrap();
+        assert_ne!(flags & libc::O_NONBLOCK, 0);
+    }
+
+    #[test]
+    fn partial_record_survives_would_block_without_exposing_stale_data() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        let fd: OwnedFd = reader.into();
+        let mut source = NonblockingFdSource {
+            file: fd.into(),
+            kick_path: None,
+            pending: vec![],
+            filled: 0,
+        };
+        let mut record = [99; 4];
+        assert_eq!(
+            source.read_one(&mut record).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        writer.write_all(&[1, 2]).unwrap();
+        assert_eq!(
+            source.read_one(&mut record).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(record, [99; 4]);
+        assert_eq!(
+            source.read_one(&mut record).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        writer.write_all(&[3, 4]).unwrap();
+        source.read_one(&mut record).unwrap();
+        assert_eq!(record, [1, 2, 3, 4]);
+        writer.write_all(&[5, 6, 7, 8]).unwrap();
+        source.read_one(&mut record).unwrap();
+        assert_eq!(record, [5, 6, 7, 8]);
+        drop(writer);
+        assert_eq!(
+            source.read_one(&mut record).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+    }
+
+    #[test]
+    fn only_transient_raw_read_errors_are_retried() {
+        for errno in [libc::EAGAIN, libc::EINTR] {
+            assert!(is_retryable_read_error(&io::Error::from_raw_os_error(
+                errno
+            )));
+        }
+        for errno in [libc::ENODEV, libc::EIO, libc::EBADF] {
+            assert!(!is_retryable_read_error(&io::Error::from_raw_os_error(
+                errno
+            )));
+        }
+        assert!(!is_retryable_read_error(
+            &io::ErrorKind::UnexpectedEof.into()
+        ));
+    }
+
+    #[test]
+    fn scan_decoder_handles_signed_shifted_big_endian_and_mixed_width_records() {
+        let channel = |axis, scan_index, ty: &str, offset| DiscoveredChannel {
+            id: format!("in_accel_{axis}"),
+            axis,
+            scan_index,
+            format: ScanFormat::parse(ty).unwrap(),
+            offset,
+            scale: 0.5,
+        };
+        let layout = compute_layout(
+            vec![
+                channel('x', 0, "le:s12/16>>4", 2),
+                channel('y', 1, "be:u16/16>>0", 0),
+            ],
+            vec![channel('z', 2, "le:s32/32>>0", 0)],
+            Some((3, ScanFormat::parse("le:s64/64>>0").unwrap())),
+        );
+        assert_eq!(layout.record_len, 16);
+        let mut record = [0; 16];
+        record[..2].copy_from_slice(&(-3i16 << 4).to_le_bytes());
+        record[2..4].copy_from_slice(&1000u16.to_be_bytes());
+        record[4..8].copy_from_slice(&(-123456i32).to_le_bytes());
+        let accel = decode_group(&layout.accel, 0.5, &record);
+        assert_eq!(accel.roll, -1.0); // Linux IIO calibration is raw + offset.
+        assert_eq!(accel.pitch, 1000.0);
+        assert_eq!(accel.scale, 0.5);
+        let gyro = decode_group(&layout.gyro, 0.5, &record);
+        assert_eq!(gyro.yaw, -123456.0);
+    }
+
+    #[test]
+    fn malformed_or_unsupported_scan_formats_fail_without_panicking() {
+        for format in [
+            "",
+            "le:",
+            "le:s0/16>>0",
+            "le:s16/0>>0",
+            "le:s16/128>>0",
+            "le:s16/16>>1",
+            "le:s12/24>>0",
+            "le:s8/8X3>>0",
+        ] {
+            assert!(ScanFormat::parse(format).is_err(), "accepted {format}");
+        }
+    }
+
+    #[test]
+    fn sysfs_only_channels_do_not_require_scan_elements_and_keep_si_scaling() {
+        let dir = TestDir::new();
+        dir.write("in_accel_x_raw", "10");
+        dir.write("in_accel_y_raw", "20");
+        dir.write("in_accel_offset", "0.5");
+        dir.write("in_accel_scale", "0.25");
+        dir.write("in_accel_y_scale", "0.5");
+        let channels = discover_sysfs_group(dir.path(), "accel");
+        let data = read_sysfs_group(&channels).unwrap().unwrap();
+        assert_eq!(data.roll, 2.625);
+        assert_eq!(data.pitch, 10.25);
+        assert_eq!(data.scale, 1.0);
+        assert!(discover_sysfs_group(dir.path(), "anglvel").is_empty());
+    }
+
+    #[test]
+    fn hardware_trigger_discovery_does_not_require_trigger_now() {
+        let dir = TestDir::new();
+        dir.write("iio:device0/name", "bmi260");
+        dir.write("trigger0/name", "bmi260-dev0");
+        assert_eq!(
+            find_trigger_for(&dir.path().join("iio:device0")).unwrap(),
+            Some("bmi260-dev0".into())
+        );
+    }
+
+    #[test]
+    fn successful_buffer_drop_disables_hardware_buffer_and_stale_scan_channels() {
+        let dir = TestDir::new();
+        dir.write("buffer/enable", "0");
+        dir.write("buffer/watermark", "4");
+        dir.write("trigger/current_trigger", "old-trigger");
+        dir.write("scan_elements/in_accel_x_en", "0");
+        dir.write("scan_elements/in_temperature_en", "1");
+        let channel = DiscoveredChannel {
+            id: "in_accel_x".into(),
+            axis: 'x',
+            scan_index: 0,
+            format: ScanFormat::parse("le:s16/16>>0").unwrap(),
+            offset: 0,
+            scale: 1.0,
+        };
+        let config = configure_buffer(
+            dir.path(),
+            &[channel],
+            &[],
+            Some(100.0),
+            TriggerStrategy::FindExisting,
+        )
+        .unwrap();
+        assert_eq!(read_trim(&dir.path().join("buffer/enable")).unwrap(), "1");
+        assert_eq!(
+            read_trim(&dir.path().join("scan_elements/in_temperature_en")).unwrap(),
+            "0"
+        );
+        assert_eq!(
+            read_trim(&dir.path().join("scan_elements/in_accel_x_en")).unwrap(),
+            "1"
+        );
+        assert_eq!(config.rate, 100.0);
+        drop(config);
+        assert_eq!(read_trim(&dir.path().join("buffer/enable")).unwrap(), "0");
+        assert_eq!(
+            read_trim(&dir.path().join("scan_elements/in_accel_x_en")).unwrap(),
+            "0"
+        );
+        assert_eq!(
+            read_trim(&dir.path().join("trigger/current_trigger")).unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn failed_buffer_setup_rolls_back_enabled_channels() {
+        let dir = TestDir::new();
+        dir.write("buffer0/enable", "0");
+        dir.write("trigger/current_trigger", "old-trigger");
+        dir.write("scan_elements/in_accel_x_en", "1");
+        // A directory instead of an enable attribute deterministically fails even as root.
+        fs::create_dir(dir.path().join("scan_elements/in_accel_y_en")).unwrap();
+        let channels: Vec<_> = ['x', 'y']
+            .into_iter()
+            .enumerate()
+            .map(|(index, axis)| DiscoveredChannel {
+                id: format!("in_accel_{axis}"),
+                axis,
+                scan_index: index as i32,
+                format: ScanFormat::parse("le:s16/16>>0").unwrap(),
+                offset: 0,
+                scale: 1.0,
+            })
+            .collect();
+        assert!(configure_buffer(
+            dir.path(),
+            &channels,
+            &[],
+            None,
+            TriggerStrategy::FindExisting
+        )
+        .is_err());
+        assert_eq!(read_trim(&dir.path().join("buffer0/enable")).unwrap(), "0");
+        assert_eq!(
+            read_trim(&dir.path().join("scan_elements/in_accel_x_en")).unwrap(),
+            "0"
+        );
+    }
+
+    #[test]
+    fn invalid_requested_and_advertised_rates_cannot_create_invalid_intervals() {
+        let dir = TestDir::new();
+        dir.write("in_accel_x_raw", "1");
+        dir.write(
+            "in_accel_sampling_frequency_available",
+            "NaN -10 0 inf 100 200",
+        );
+        let channels = discover_sysfs_group(dir.path(), "accel");
+        for rate in [f64::NAN, f64::INFINITY, -1.0, 0.0] {
+            assert_eq!(
+                configure_sysfs_rate(dir.path(), &channels, &[], Some(rate)),
+                200.0
+            );
+        }
+    }
+    #[test]
+    fn dedicated_hrtimer_binds_rate_and_cleans_up_without_real_configfs() {
+        let dir = TestDir::new();
+        dir.write("devices/iio:device0/buffer/enable", "1");
+        dir.write("devices/iio:device0/trigger/current_trigger", "old");
+        dir.write("devices/trigger0/name", "inputplumber-test");
+        dir.write("devices/trigger0/sampling_frequency", "10");
+        let configfs = dir.path().join("fake-configfs");
+        fs::create_dir(&configfs).unwrap();
+        let base = dir.path().join("devices/iio:device0");
+        let guard = bind_trigger_with_fallback(
+            &base,
+            &TriggerStrategy::Hrtimer("inputplumber-test".into()),
+            100.0,
+            &configfs,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            read_trim(&base.join("trigger/current_trigger")).unwrap(),
+            "inputplumber-test"
+        );
+        assert_eq!(
+            read_trim(&dir.path().join("devices/trigger0/sampling_frequency")).unwrap(),
+            "100"
+        );
+        assert!(configfs.join("inputplumber-test").is_dir());
+        drop(guard);
+        assert!(!configfs.join("inputplumber-test").exists());
+        assert_eq!(read_trim(&base.join("buffer/enable")).unwrap(), "0");
+        assert_eq!(
+            read_trim(&base.join("trigger/current_trigger")).unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn unavailable_hrtimer_uses_matching_hardware_or_returns_error() {
+        let dir = TestDir::new();
+        dir.write("devices/iio:device0/name", "bmi260");
+        dir.write("devices/iio:device0/trigger/current_trigger", "");
+        dir.write("devices/trigger0/name", "bmi260-dev0");
+        let base = dir.path().join("devices/iio:device0");
+        let unavailable = dir.path().join("no-configfs");
+        let strategy = TriggerStrategy::Hrtimer("inputplumber-test".into());
+        assert!(
+            bind_trigger_with_fallback(&base, &strategy, 100.0, &unavailable)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            read_trim(&base.join("trigger/current_trigger")).unwrap(),
+            "bmi260-dev0"
+        );
+        fs::remove_dir_all(dir.path().join("devices/trigger0")).unwrap();
+        assert!(bind_trigger_with_fallback(&base, &strategy, 100.0, &unavailable).is_err());
+    }
 }

@@ -575,10 +575,12 @@ impl CompositeDevice {
                         break 'main;
                     }
                     CompositeCommand::Suspend(sender) => {
-                        log::info!(
-                            "Preparing to suspend target devices for: {}",
-                            self.dbus.path()
-                        );
+                        log::info!("Preparing to suspend devices for: {}", self.dbus.path());
+                        for (id, source) in self.source_devices.iter() {
+                            if let Err(e) = source.suspend().await {
+                                log::error!("Failed to suspend source device {id}: {e:?}");
+                            }
+                        }
                         self.targets.handle_suspend().await;
                         if let Err(e) = sender.send(()).await {
                             log::error!("Failed to send suspend response: {e:?}");
@@ -591,6 +593,11 @@ impl CompositeDevice {
                         );
                         let persistent_id = self.get_persistent_id().await;
                         self.targets.handle_resume(&persistent_id).await;
+                        for (id, source) in self.source_devices.iter() {
+                            if let Err(e) = source.resume().await {
+                                log::error!("Failed to resume source device {id}: {e:?}");
+                            }
+                        }
                         if let Err(e) = sender.send(()).await {
                             log::error!("Failed to send resume response: {e:?}");
                         }
