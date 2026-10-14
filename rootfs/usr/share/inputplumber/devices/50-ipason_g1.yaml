@@ -41,7 +41,7 @@ source_devices:
       phys_path: usb-0000:c4:00.3-5/input1
       handler: event*
     capability_map_id: ipason_homepage
-  
+
   - group: imu
     iio:
       name: bmi323-imu

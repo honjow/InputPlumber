@@ -10,10 +10,10 @@ pub mod gpd_touchpad_2024;
 pub mod horipad_steam;
 pub mod legion_go;
 pub mod legion_go2;
-pub mod legion_go_tp;
 pub mod legion_go_s_imu;
 pub mod legion_go_s_touchpad;
 pub mod legion_go_s_xinput;
+pub mod legion_go_tp;
 pub mod msi_claw;
 pub mod opineo_touchpad;
 pub mod oxp_hid;
@@ -43,13 +43,13 @@ use crate::{
 use self::{
     ayaneo_haptics::AyaneoHaptics, blocked::BlockedHidrawDevice, dualsense::DualSenseController,
     flydigi_vader_4_pro::Vader4Pro, fts3528::Fts3528Touchscreen,
-    generic_buttons::GenericHidrawButtons, gpd_macro_keyboard::GpdMacroKeyboard, gpd_touchpad_2023::GpdTouchpad2023,
-    gpd_touchpad_2024::GpdTouchpad2024, horipad_steam::HoripadSteam, legion_go::LegionGoController,
-    legion_go2::LegionGo2Controller, legion_go_s_imu::LegionGoSImuController,
-    legion_go_s_touchpad::LegionGoSTouchpadController, legion_go_s_xinput::LegionGoSXInputController,
-    msi_claw::MsiClawController, opineo_touchpad::OrangePiNeoTouchpad, oxp_hid::OxpHid,
-    rog_ally::RogAlly, steam_deck::DeckController, ultimate_2::Ultimate2, xpad_uhid::XpadUhid,
-    zotac_zone::ZotacZone,
+    generic_buttons::GenericHidrawButtons, gpd_macro_keyboard::GpdMacroKeyboard,
+    gpd_touchpad_2023::GpdTouchpad2023, gpd_touchpad_2024::GpdTouchpad2024,
+    horipad_steam::HoripadSteam, legion_go::LegionGoController, legion_go2::LegionGo2Controller,
+    legion_go_s_imu::LegionGoSImuController, legion_go_s_touchpad::LegionGoSTouchpadController,
+    legion_go_s_xinput::LegionGoSXInputController, msi_claw::MsiClawController,
+    opineo_touchpad::OrangePiNeoTouchpad, oxp_hid::OxpHid, rog_ally::RogAlly,
+    steam_deck::DeckController, ultimate_2::Ultimate2, xpad_uhid::XpadUhid, zotac_zone::ZotacZone,
 };
 use super::{InputError, OutputError, SourceDeviceCompatible, SourceDriver, SourceDriverOptions};
 
