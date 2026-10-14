@@ -1,4 +1,4 @@
-use super::{restore_saved_permissions, tracked_device_name, SAVED_PERMISSIONS};
+use super::{restore_saved_permissions, tracked_device_name, SavedPermissions, SAVED_PERMISSIONS};
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -27,10 +27,10 @@ impl TestNode {
         fs::set_permissions(&self.0, fs::Permissions::from_mode(0)).unwrap();
     }
     fn record(&self, mode: u32) {
-        SAVED_PERMISSIONS
-            .lock()
-            .unwrap()
-            .insert(self.path().into(), mode);
+        SAVED_PERMISSIONS.lock().unwrap().insert(
+            self.path().into(),
+            SavedPermissions::from_metadata(&fs::metadata(&self.0).unwrap(), mode),
+        );
     }
     fn mode(&self) -> u32 {
         fs::metadata(&self.0).unwrap().permissions().mode() & 0o7777
@@ -65,13 +65,20 @@ fn leaves_unmanaged_hidden_node_unchanged() {
 #[test]
 fn failed_restore_keeps_record_for_retry() {
     let node = TestNode::new();
+    node.create_hidden();
     node.record(0o600);
+    let moved = node.0.with_file_name("moved");
+    fs::rename(&node.0, &moved).unwrap();
     restore_saved_permissions(node.path());
     assert_eq!(
-        SAVED_PERMISSIONS.lock().unwrap().get(node.path()),
-        Some(&0o600)
+        SAVED_PERMISSIONS
+            .lock()
+            .unwrap()
+            .get(node.path())
+            .map(|record| record.mode),
+        Some(0o600)
     );
-    node.create_hidden();
+    fs::rename(moved, &node.0).unwrap();
     restore_saved_permissions(node.path());
     assert_eq!(node.mode(), 0o600);
 }
@@ -79,8 +86,21 @@ fn failed_restore_keeps_record_for_retry() {
 #[test]
 fn fallback_name_requires_ownership_and_valid_node_name() {
     let node = TestNode::new();
+    node.create_hidden();
     node.record(0o660);
     assert_eq!(tracked_device_name(node.path()), Some("event123".into()));
     assert_eq!(tracked_device_name("/dev/input/event-not-a-node"), None);
     assert_eq!(tracked_device_name("/dev/hidraw"), None);
+}
+
+#[test]
+fn never_restores_a_replacement_device_using_stale_record() {
+    let node = TestNode::new();
+    node.create_hidden();
+    node.record(0o660);
+    fs::rename(&node.0, node.0.with_file_name("original")).unwrap();
+    node.create_hidden();
+    restore_saved_permissions(node.path());
+    assert_eq!(node.mode(), 0);
+    assert!(!SAVED_PERMISSIONS.lock().unwrap().contains_key(node.path()));
 }
